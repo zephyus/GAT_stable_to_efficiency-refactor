@@ -35,8 +35,6 @@ def run_rnn(layer, xs, dones, s):
     n_out = int(s.shape[0]) // 2
     s = torch.unsqueeze(s, 0)
     h, c = torch.chunk(s, 2, dim=1)
-    h = h.cuda()
-    c = c.cuda()
     outputs = []
     for ind, (x, done) in enumerate(zip(xs, dones)):
         c = c * (1-done)
@@ -47,13 +45,13 @@ def run_rnn(layer, xs, dones, s):
     return torch.cat(outputs), torch.squeeze(s)
 
 
-def one_hot(x, oh_dim, dim=-1):
+def one_hot(x, oh_dim, dim=-1, device=None):
     oh_shape = list(x.shape)
     if dim == -1:
         oh_shape.append(oh_dim)
     else:
         oh_shape = oh_shape[:dim+1] + [oh_dim] + oh_shape[dim+1:]
-    x_oh = torch.zeros(oh_shape)
+    x_oh = torch.zeros(oh_shape, device=device)
     x = torch.unsqueeze(x, -1)
     if dim == -1:
         x_oh = x_oh.scatter(dim, x, 1)
@@ -162,7 +160,7 @@ class OnPolicyBuffer(TransBuffer):
         Rs = []
         Advs = []
         # use post-step dones here
-        for r, v, done in zip(self.rs[::-1], self.vs[::-1], self.dones[:0:-1]):
+        for r, v, done in zip(self.rs[::-1], self.vs[::-1], self.dones[:0::-1]):
             R = self.gamma * R * (1.-done)
             # additional spatial rewards
             for t in range(self.max_distance + 1):
@@ -203,7 +201,7 @@ class MultiAgentOnPolicyBuffer(OnPolicyBuffer):
             cur_Rs = []
             cur_Advs = []
             cur_R = R[i]
-            for r, v, done in zip(self.rs[::-1], vs[::-1,i], self.dones[:0:-1]):
+            for r, v, done in zip(self.rs[::-1], vs[::-1,i], self.dones[:0::-1]):
                 cur_R = r + self.gamma * cur_R * (1.-done)
                 cur_Adv = cur_R - v
                 cur_Rs.append(cur_R)
@@ -226,7 +224,7 @@ class MultiAgentOnPolicyBuffer(OnPolicyBuffer):
             tdiff = dt
             distance_mask = self.distance_mask[i]
             max_distance = self.max_distance[i]
-            for r, v, done in zip(self.rs[::-1], vs[::-1,i], self.dones[:0:-1]):
+            for r, v, done in zip(self.rs[::-1], vs[::-1,i], self.dones[:0::-1]):
                 cur_R = self.gamma * cur_R * (1.-done)
                 if done:
                     tdiff = 0
@@ -256,7 +254,7 @@ class MultiAgentOnPolicyBuffer(OnPolicyBuffer):
             cur_R = R[i]
             distance_mask = self.distance_mask[i]
             max_distance = self.max_distance[i]
-            for r, v, done in zip(self.rs[::-1], vs[::-1,i], self.dones[:0:-1]):
+            for r, v, done in zip(self.rs[::-1], vs[::-1,i], self.dones[:0::-1]):
                 cur_R = self.gamma * cur_R * (1.-done)
                 # additional spatial rewards
                 for t in range(max_distance + 1):
