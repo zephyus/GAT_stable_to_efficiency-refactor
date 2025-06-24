@@ -317,6 +317,92 @@ class NCMultiAgentPolicy(Policy):
         #接起來，形成最後LSTM的輸入s_i
         return torch.cat(s_i, dim=1)
 
+    def _compute_s_features_flat(self, obs_T_N_Do, fps_T_N_Dfp, h_for_comm_N_H):
+        """Vectorized computation of s features across T steps."""
+        T, N, Do = obs_T_N_Do.shape
+        device = obs_T_N_Do.device
+        H = self.n_h
+        n_fc = self.n_fc
+
+        obs_flat = obs_T_N_Do.reshape(T * N, Do)
+        fps_dim = fps_T_N_Dfp.size(-1) if fps_T_N_Dfp is not None else 0
+        if fps_dim:
+            fps_flat = fps_T_N_Dfp.reshape(T * N, fps_dim)
+        h_repeat = h_for_comm_N_H.unsqueeze(0).expand(T, N, H).reshape(T * N, H)
+
+        s_cat_list = []
+        for i in range(N):
+            n_n = self.n_n_ls[i]
+            idx_nei = self.neighbor_index_ls[i].to(device)
+
+            if n_n:
+                if not hasattr(self, '_arange_cache'):
+                    self._arange_cache = {}
+                key = (T, device)
+                if key not in self._arange_cache:
+                    self._arange_cache[key] = torch.arange(T, device=device).unsqueeze(1)
+                base = self._arange_cache[key] * N
+                idx_flat = (base + idx_nei.unsqueeze(0)).reshape(-1)
+                m_i_flat = h_repeat[idx_flat].reshape(T, n_n * H)
+            else:
+                m_i_flat = torch.zeros(T, 0, device=device)
+
+            if self.identical:
+                x_i_flat = obs_T_N_Do[:, i, :].reshape(T, Do)
+                if n_n:
+                    nx_i_flat = obs_flat[idx_flat].reshape(T, n_n * Do)
+                    if fps_dim:
+                        p_i_flat = fps_flat[idx_flat].reshape(T, n_n * fps_dim)
+                    else:
+                        p_i_flat = torch.zeros(T, 0, device=device)
+                else:
+                    nx_i_flat = torch.zeros(T, 0, device=device)
+                    p_i_flat = torch.zeros(T, 0, device=device)
+                fc_x_in = torch.cat([x_i_flat, nx_i_flat], dim=1)
+            else:
+                ns_i = self.n_s_ls[i]
+                x_i_raw = obs_T_N_Do[:, i, :ns_i].reshape(T, ns_i)
+                p_seg_ls, nx_seg_ls = [], []
+                for j_nei, nei_id in enumerate(idx_nei):
+                    na_j = self.na_ls_ls[i][j_nei]
+                    ns_j = self.ns_ls_ls[i][j_nei]
+                    idx_flat = (base + nei_id).reshape(-1)
+                    if fps_dim:
+                        fp_j = fps_flat[idx_flat][:, :na_j]
+                        p_seg_ls.append(fp_j)
+                    nx_j = obs_flat[idx_flat][:, :ns_j]
+                    nx_seg_ls.append(nx_j)
+                p_i_flat = torch.cat(p_seg_ls, dim=1) if p_seg_ls else torch.zeros(T, 0, device=device)
+                nx_i_flat = torch.cat(nx_seg_ls, dim=1) if nx_seg_ls else torch.zeros(T, 0, device=device)
+                fc_x_in = torch.cat([x_i_raw, nx_i_flat], dim=1)
+
+            s_x = F.relu(self.fc_x_layers[i](fc_x_in))
+
+            if n_n and self.fc_p_layers[i] is not None and fps_dim:
+                in_dim = self.fc_p_layers[i].in_features
+                if p_i_flat.size(1) > in_dim:
+                    logging.warning(
+                        f"Agent {i}: fingerprint dim {p_i_flat.size(1)} exceeds {in_dim}, truncating"
+                    )
+                    p_i_flat = p_i_flat[:, :in_dim]
+                elif p_i_flat.size(1) < in_dim:
+                    pad = torch.zeros(T, in_dim - p_i_flat.size(1), device=device)
+                    p_i_flat = torch.cat([p_i_flat, pad], dim=1)
+                p_proj = F.relu(self.fc_p_layers[i](p_i_flat))
+            else:
+                p_proj = torch.zeros(T, n_fc, device=device)
+
+            if self.fc_m_layers[i] is not None and n_n:
+                m_proj = F.relu(self.fc_m_layers[i](m_i_flat))
+            else:
+                m_proj = torch.zeros(T, n_fc, device=device)
+
+            s_all_T_3fc = torch.cat([s_x, p_proj, m_proj], dim=1)
+            s_cat_list.append(s_all_T_3fc)
+
+        s_T_N_3fc = torch.stack(s_cat_list, dim=1)
+        return s_T_N_3fc.reshape(T * N, 3 * n_fc)
+
     def _get_neighbor_dim(self, i_agent):
         n_n = int(np.sum(self.neighbor_mask[i_agent]))
         if self.identical:
@@ -379,6 +465,11 @@ class NCMultiAgentPolicy(Policy):
         self.adj = torch.tensor(self.neighbor_mask, dtype=torch.float32)
         # Add self-connections to adjacency matrix
         self.adj = self.adj + torch.eye(self.adj.size(0), dtype=self.adj.dtype)
+        # pre-compute neighbor indices for quick gather
+        self.neighbor_index_ls = []
+        for i in range(self.n_agent):
+            idx = torch.tensor(np.where(self.neighbor_mask[i])[0], dtype=torch.long)
+            self.neighbor_index_ls.append(idx)
         
         for i in range(self.n_agent):
             n_n, n_ns, n_na, ns_ls, na_ls = self._get_neighbor_dim(i)
