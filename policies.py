@@ -67,7 +67,7 @@ class Policy(nn.Module):
                 for na_val, na_dim in zip(na_ls, self.na_dim_ls):
                     na_sparse.append(torch.squeeze(one_hot(na_val, na_dim), dim=1))
                 na_sparse = torch.cat(na_sparse, dim=1)
-            h = torch.cat([h, na_sparse.to(next(self.parameters()).device)], dim=1)
+            h = torch.cat([h, na_sparse.to(self.dev)], dim=1)
         return self.critic_head(h).squeeze()
 
     def _run_loss(self, actor_dist, e_coef, v_coef, vs, As, Rs, Advs):
@@ -80,10 +80,9 @@ class Policy(nn.Module):
 		# As：實際採取的動作
 		# Rs：目標價值（回報）
 		# Advs：優勢函數
-        dev = next(self.parameters()).device
-        As = As.to(dev)
-        Advs = Advs.to(dev)
-        Rs = Rs.to(dev)
+        As = As.to(self.dev)
+        Advs = Advs.to(self.dev)
+        Rs = Rs.to(self.dev)
         log_probs = actor_dist.log_prob(As)
         policy_loss = -(log_probs * Advs).mean()
         entropy_loss = -(actor_dist.entropy()).mean() * e_coef
@@ -116,13 +115,13 @@ class LstmPolicy(Policy):
         self.n_fc = n_fc
         self.n_n = n_n
         self._init_net()
+        self.dev = next(self.parameters()).device
         self._reset()
 
     def backward(self, obs, nactions, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        dev = next(self.parameters()).device
-        obs = torch.from_numpy(obs).float().to(dev)
-        dones = torch.from_numpy(dones).float().to(dev)
+        obs = torch.from_numpy(obs).float().to(self.dev)
+        dones = torch.from_numpy(dones).float().to(self.dev)
         xs = self._encode_ob(obs)
         hs, new_states = run_rnn(self.lstm_layer, xs, dones, self.states_bw)
         # backward grad is limited to the minibatch
@@ -131,18 +130,17 @@ class LstmPolicy(Policy):
         vs = self._run_critic_head(hs, nactions)
         self.policy_loss, self.value_loss, self.entropy_loss = \
             self._run_loss(actor_dist, e_coef, v_coef, vs,
-                           torch.from_numpy(acts).long(),
-                           torch.from_numpy(Rs).float(),
-                           torch.from_numpy(Advs).float())
+                           torch.from_numpy(acts).long().to(self.dev),
+                           torch.from_numpy(Rs).float().to(self.dev),
+                           torch.from_numpy(Advs).float().to(self.dev))
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
     def forward(self, ob, done, naction=None, out_type='p'):
-        dev = next(self.parameters()).device
-        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().to(dev)
-        done = torch.from_numpy(np.expand_dims(done, axis=0)).float().to(dev)
+        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().to(self.dev)
+        done = torch.from_numpy(np.expand_dims(done, axis=0)).float().to(self.dev)
         x = self._encode_ob(ob)
         h, new_states = run_rnn(self.lstm_layer, x, done, self.states_fw)
         if out_type.startswith('p'):
@@ -170,8 +168,8 @@ class LstmPolicy(Policy):
 
     def _reset(self):
         # forget the cumulative states every cum_step
-        self.states_fw = torch.zeros(self.n_lstm * 2)  ### h = short term(final output) , c = long term
-        self.states_bw = torch.zeros(self.n_lstm * 2)
+        self.states_fw = torch.zeros(self.n_lstm * 2, device=self.dev)  ### h = short term(final output) , c = long term
+        self.states_bw = torch.zeros(self.n_lstm * 2, device=self.dev)
 
 
 class FPPolicy(LstmPolicy):
@@ -246,10 +244,10 @@ class NCMultiAgentPolicy(Policy):
 
     def backward(self, obs, fps, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        obs = torch.from_numpy(obs).float().transpose(0, 1)
-        dones = torch.from_numpy(dones).float()
-        fps = torch.from_numpy(fps).float().transpose(0, 1)
-        acts = torch.from_numpy(acts).long()
+        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
+        dones = torch.from_numpy(dones).float().to(self.dev)
+        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        acts = torch.from_numpy(acts).long().to(self.dev)
         hs, new_states = self._run_comm_layers(obs, dones, fps, self.states_bw)
         # backward grad is limited to the minibatch
         self.states_bw = new_states.detach()
@@ -258,8 +256,8 @@ class NCMultiAgentPolicy(Policy):
         self.policy_loss = 0
         self.value_loss = 0
         self.entropy_loss = 0
-        Rs = torch.from_numpy(Rs).float()
-        Advs = torch.from_numpy(Advs).float()
+        Rs = torch.from_numpy(Rs).float().to(self.dev)
+        Advs = torch.from_numpy(Advs).float().to(self.dev)
         for i in range(self.n_agent):
             actor_dist_i = torch.distributions.categorical.Categorical(logits=ps[i])
             policy_loss_i, value_loss_i, entropy_loss_i = \
@@ -275,16 +273,16 @@ class NCMultiAgentPolicy(Policy):
 
     def forward(self, ob, done, fp, action=None, out_type='p'):
         # TxNxm
-        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float()
-        done = torch.from_numpy(np.expand_dims(done, axis=0)).float()
-        fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
+        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().to(self.dev)
+        done = torch.from_numpy(np.expand_dims(done, axis=0)).float().to(self.dev)
+        fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float().to(self.dev)
         # h dim: NxTxm
         h, new_states = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
             self.states_fw = new_states.detach()
             return self._run_actor_heads(h, detach=True)
         else:
-            action = torch.from_numpy(np.expand_dims(action, axis=1)).long()
+            action = torch.from_numpy(np.expand_dims(action, axis=1)).long().to(self.dev)
             return self._run_critic_heads(h, action, detach=True)
 
     def _get_comm_s(self, i, n_n, x, h, p):
@@ -297,11 +295,11 @@ class NCMultiAgentPolicy(Policy):
         # h是所有agent的hidden state
         # x是所有agent目前的觀察值 (ob)，他後面把ob改成x超靠杯
         # p是所有agent的policy fingerprint
-        h = h.to(next(self.parameters()).device)
-        x = x.to(next(self.parameters()).device)
-        p = p.to(next(self.parameters()).device)
+        h = h.to(self.dev)
+        x = x.to(self.dev)
+        p = p.to(self.dev)
         #js是鄰居的index (這個numpy where的用法之前在model.py有講過)
-        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(next(self.parameters()).device)
+        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
         #m_i 是鄰居的訊息，獲取方法是：
         #torch.index_select(h, 0, js)： 從h中選擇第js行，即第i個鄰居的隱藏狀態。
 		#view(1, self.n_h * n_n)： 將選擇的隱藏狀態展平成一維向量，形狀為 (1, self.n_h * n_n)。
@@ -553,8 +551,8 @@ class NCMultiAgentPolicy(Policy):
             self._init_critic_head(n_na)
 
     def _reset(self):
-        self.states_fw = torch.zeros(self.n_agent, self.n_h * 2)
-        self.states_bw = torch.zeros(self.n_agent, self.n_h * 2)
+        self.states_fw = torch.zeros(self.n_agent, self.n_h * 2, device=self.dev)
+        self.states_bw = torch.zeros(self.n_agent, self.n_h * 2, device=self.dev)
 
     def _run_actor_heads(self, hs, detach=False):
         ps = []
@@ -609,11 +607,11 @@ class NCMultiAgentPolicy(Policy):
         for i in range(self.n_agent):
             n_n = self.n_n_ls[i]
             if n_n:
-                js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(next(self.parameters()).device)
+                js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
                 na_i = torch.index_select(actions, 0, js)
                 na_i_ls = []
                 for j in range(n_n):
-                    na_i_ls.append(one_hot(na_i[j], self.na_ls_ls[i][j]).to(next(self.parameters()).device))
+                    na_i_ls.append(one_hot(na_i[j], self.na_ls_ls[i][j]).to(self.dev))
                 h_i = torch.cat([hs[i]] + na_i_ls, dim=1)
             else:
                 h_i = hs[i]
@@ -762,11 +760,11 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                 if i in self.groups: # back hand
                     n_n = self.n_n_ls[i]
                     if n_n:
-                        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(next(self.parameters()).device)
+                        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
                         na_i = torch.index_select(preactions, 0, js)
                         na_i_ls = []
                         for j in range(n_n):
-                            na_i_ls.append(one_hot(na_i[j], self.na_ls_ls[i][j]).to(next(self.parameters()).device))
+                            na_i_ls.append(one_hot(na_i[j], self.na_ls_ls[i][j]).to(self.dev))
                         h_i = torch.cat([hs[i]] + na_i_ls, dim=1)
                     else:
                         h_i = hs[i]
@@ -879,11 +877,10 @@ class CommNetMultiAgentPolicy(NCMultiAgentPolicy):
         self.lstm_layers.append(lstm_layer)
 
     def _get_comm_s(self, i, n_n, x, h, p):
-        dev = next(self.parameters()).device
-        h = h.to(dev)
-        x = x.to(dev)
-        p = p.to(dev)
-        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(dev)
+        h = h.to(self.dev)
+        x = x.to(self.dev)
+        p = p.to(self.dev)
+        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
         m_i = torch.index_select(h, 0, js).mean(dim=0, keepdim=True)
         nx_i = torch.index_select(x, 0, js)
         if self.identical:
@@ -928,10 +925,9 @@ class DIALMultiAgentPolicy(NCMultiAgentPolicy):
         self.lstm_layers.append(lstm_layer)
 
     def _get_comm_s(self, i, n_n, x, h, p):
-        dev = next(self.parameters()).device
-        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(dev)
-        m_i = torch.index_select(h, 0, js).view(1, self.n_h * n_n).to(dev)
-        nx_i = torch.index_select(x, 0, js).to(dev)
+        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
+        m_i = torch.index_select(h, 0, js).view(1, self.n_h * n_n).to(self.dev)
+        nx_i = torch.index_select(x, 0, js).to(self.dev)
         if self.identical:
             nx_i = nx_i.view(1, self.n_s * n_n)
             x_i = x[i].unsqueeze(0)

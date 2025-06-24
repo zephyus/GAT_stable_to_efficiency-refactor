@@ -45,7 +45,7 @@ class Policy(nn.Module):
         if n_n is None:
             n_n = int(self.n_n)
         if n_n:
-            na = torch.from_numpy(na).long().to(next(self.parameters()).device)
+            na = torch.from_numpy(na).long().to(self.dev)
             if self.identical:
                 na_sparse = one_hot(na, self.n_a)
                 na_sparse = na_sparse.view(-1, self.n_a * n_n)
@@ -55,14 +55,13 @@ class Policy(nn.Module):
                 for na_val, na_dim in zip(na_ls, self.na_dim_ls):
                     na_sparse.append(torch.squeeze(one_hot(na_val, na_dim), dim=1))
                 na_sparse = torch.cat(na_sparse, dim=1)
-            h = torch.cat([h, na_sparse.to(next(self.parameters()).device)], dim=1)
+            h = torch.cat([h, na_sparse.to(self.dev)], dim=1)
         return self.critic_head(h).squeeze()
 
     def _run_loss(self, actor_dist, e_coef, v_coef, vs, As, Rs, Advs):
-        dev = next(self.parameters()).device
-        As = As.to(dev)
-        Advs = Advs.to(dev)
-        Rs = Rs.to(dev)
+        As = As.to(self.dev)
+        Advs = Advs.to(self.dev)
+        Rs = Rs.to(self.dev)
         log_probs = actor_dist.log_prob(As)
         policy_loss = -(log_probs * Advs).mean()
         entropy_loss = -(actor_dist.entropy()).mean() * e_coef
@@ -90,12 +89,13 @@ class LstmPolicy(Policy):
         self.n_fc = n_fc
         self.n_n = n_n
         self._init_net()
+        self.dev = next(self.parameters()).device
         self._reset()
 
     def backward(self, obs, nactions, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        obs = torch.from_numpy(obs).float().to(next(self.parameters()).device)
-        dones = torch.from_numpy(dones).float().to(next(self.parameters()).device)
+        obs = torch.from_numpy(obs).float().to(self.dev)
+        dones = torch.from_numpy(dones).float().to(self.dev)
         xs = self._encode_ob(obs)
         hs, new_states = run_rnn(self.lstm_layer, xs, dones, self.states_bw)
         self.states_bw = new_states.detach()
@@ -103,18 +103,17 @@ class LstmPolicy(Policy):
         vs = self._run_critic_head(hs, nactions)
         self.policy_loss, self.value_loss, self.entropy_loss = \
             self._run_loss(actor_dist, e_coef, v_coef, vs,
-                           torch.from_numpy(acts).long().to(next(self.parameters()).device),
-                           torch.from_numpy(Rs).float().to(next(self.parameters()).device),
-                           torch.from_numpy(Advs).float().to(next(self.parameters()).device))
+                           torch.from_numpy(acts).long().to(self.dev),
+                           torch.from_numpy(Rs).float().to(self.dev),
+                           torch.from_numpy(Advs).float().to(self.dev))
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
     def forward(self, ob, done, naction=None, out_type='p'):
-        dev = next(self.parameters()).device
-        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().to(dev)
-        done = torch.from_numpy(np.expand_dims(done, axis=0)).float().to(dev)
+        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().to(self.dev)
+        done = torch.from_numpy(np.expand_dims(done, axis=0)).float().to(self.dev)
         x = self._encode_ob(ob)
         h, new_states = run_rnn(self.lstm_layer, x, done, self.states_fw)
         if out_type.startswith('p'):
@@ -135,8 +134,8 @@ class LstmPolicy(Policy):
         self._init_critic_head(self.n_lstm)
 
     def _reset(self):
-        self.states_fw = torch.zeros(self.n_lstm * 2)
-        self.states_bw = torch.zeros(self.n_lstm * 2)
+        self.states_fw = torch.zeros(self.n_lstm * 2, device=self.dev)
+        self.states_bw = torch.zeros(self.n_lstm * 2, device=self.dev)
 
 
 class FPPolicy(LstmPolicy):
