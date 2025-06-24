@@ -220,7 +220,7 @@ class NCMultiAgentPolicy(nn.Module):
         self.model_config   = model_config or {}
 
         # ---------- flags ----------
-        self.use_residual   = bool(self.model_config.get("use_residual", True))
+        self.use_residual   = bool(self.model_config.get("use_residual", False))
         self.use_layer_norm = bool(self.model_config.get("use_layer_norm", False))
         self.use_projection = bool(self.model_config.get("use_projection", False))
         self.use_gat        = os.getenv("USE_GAT", "1") == "1"
@@ -268,7 +268,7 @@ class NCMultiAgentPolicy(nn.Module):
         # --- 0-D → (1,1) --------------------------------------------------
         if isinstance(x, (int, float)):                 # Python scalar
             x = torch.tensor(float(x), device=self.dev)
-        x = x.to(self.dev)
+        x = x.to(self.dev).float()
         if x.dim() == 0:                                # 0-D Tensor
             x = x.view(1, 1)
 
@@ -325,13 +325,13 @@ class NCMultiAgentPolicy(nn.Module):
                  e_coef, v_coef, summary_writer=None, global_step=None):
         """Training backward pass for computing losses and gradients."""
         # Convert inputs to tensors and move to device
-        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
+        obs = torch.from_numpy(obs).float().to(self.dev)
         dones_np = np.asarray(dones)
         if dones_np.ndim == 1:
             dones_T_N = torch.from_numpy(dones_np).float().unsqueeze(-1).expand(-1, self.n_agent).to(self.dev)
         else:
             dones_T_N = torch.from_numpy(dones_np).float().to(self.dev)
-        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        fps = torch.from_numpy(fps).float().to(self.dev)
         acts = torch.from_numpy(acts).long().to(self.dev)
 
         # Forward pass through communication layers
@@ -398,7 +398,13 @@ class NCMultiAgentPolicy(nn.Module):
         self.fc_m_layers  = nn.ModuleList()
         self.actor_heads  = nn.ModuleList()
         self.critic_heads = nn.ModuleList()
-        self.lstm_layers  = nn.ModuleList()  # hetero only
+        # one LSTM per agent (even if identical)
+        self.lstm_layers = nn.ModuleList([
+            nn.LSTM(3 * self.n_fc, self.n_h, 1)
+            for _ in range(self.n_agent)
+        ])
+        for lstm in self.lstm_layers:
+            init_layer(lstm, "lstm")
 
         # cache per-agent dims
         self.n_n_ls, self.ns_ls_ls, self.na_ls_ls = [], [], []
@@ -407,11 +413,6 @@ class NCMultiAgentPolicy(nn.Module):
         drop = float(self.model_config.get("gat_dropout_init", 0.2))
         self.gat_layer = GraphAttention(3 * self.n_fc, 3 * self.n_fc,
                                         dropout=drop, alpha=0.2)
-
-        # ----- shared / per-agent LSTM -----
-        if self.identical:
-            self.shared_lstm = nn.LSTM(3 * self.n_fc, self.n_h, 1)
-            init_layer(self.shared_lstm, "lstm")
 
         # ----- build agent-specific modules -----
         for i in range(self.n_agent):
@@ -429,11 +430,6 @@ class NCMultiAgentPolicy(nn.Module):
             self.fc_p_layers.append(fc_p)
             self.fc_m_layers.append(fc_m)
 
-            # per-agent LSTM for hetero
-            if not self.identical:
-                lstm = nn.LSTM(3 * self.n_fc, self.n_h, 1)
-                init_layer(lstm, "lstm")
-                self.lstm_layers.append(lstm)
 
             # heads
             self._init_actor_head(self.n_a if self.identical else self.n_a_ls[i])
@@ -477,68 +473,68 @@ class NCMultiAgentPolicy(nn.Module):
     #  Communication feature vector (vectorised)                        #
     # ------------------------------------------------------------------#
     def _compute_s_features_flat(self, obs_T_N_Do, fps_T_N_Dfp, h_N_H):
-        # identical to earlier vectorised version - kept for brevity
-        # (完整程式碼同前一輪批次化版本，含 ReLU)
-        T, N, Do = obs_T_N_Do.shape
-        device, n_fc, H = obs_T_N_Do.device, self.n_fc, self.n_h
-        obs_flat = obs_T_N_Do.reshape(T*N, Do)
-        fps_dim  = fps_T_N_Dfp.size(-1) if fps_T_N_Dfp is not None else 0
-        fps_flat = fps_T_N_Dfp.reshape(T*N, fps_dim) if fps_dim else None
-        
-        if h_N_H.dim() == 3:
-            # Already has a batch-like dim, e.g. (1, N, H)
-            h_repeat = h_N_H.expand(T, -1, -1).reshape(T*N, H)
-        else:
-            # Standard (N, H)
-            h_repeat = h_N_H.unsqueeze(0).expand(T, -1, -1).reshape(T*N, H)
+        """Legacy wrapper kept for compatibility (unused)."""
+        T = obs_T_N_Do.size(0)
+        s_list = []
+        for t in range(T):
+            fp = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
+            s_t = self._compute_s_features_flat_step(obs_T_N_Do[t], fp, h_N_H)
+            s_list.append(s_t)
+        s_T_N_D = torch.stack(s_list, dim=0)
+        return s_T_N_D.reshape(T * self.n_agent, -1)
+
+    def _compute_s_features_flat_step(self, x_N_Do, fp_N_Dfp, h_N_H):
+        """Compute communication features for a single timestep."""
+        N, Do = x_N_Do.shape
+        device, n_fc, H = x_N_Do.device, self.n_fc, self.n_h
+        fps_dim = fp_N_Dfp.size(-1) if fp_N_Dfp is not None else 0
 
         s_cat = []
-        # ── single Python loop over agents ──
         for i in range(N):
-            n_n   = self.n_n_ls[i]
-            idx_n = self.neighbor_index_ls[i]
+            n_n = self.n_n_ls[i]
+            idx_n = self.neighbor_index_ls[i].to(device)
             if n_n:
-                base  = torch.arange(T, device=device).unsqueeze(1) * N
-                idx_f = (base + idx_n.unsqueeze(0)).reshape(-1)
-                m_i   = h_repeat[idx_f].reshape(T, n_n*H)
+                m_i = h_N_H[idx_n].reshape(1, n_n * H)
             else:
-                m_i   = torch.zeros(T, 0, device=device)
+                m_i = torch.zeros(1, 0, device=device)
 
-            # -------- assemble x/nx/p ----------
             if self.identical:
-                x_i = obs_T_N_Do[:, i, :].reshape(T, Do)
+                x_i = x_N_Do[i].unsqueeze(0)
                 if n_n:
-                    nx_i = obs_flat[idx_f].reshape(T, n_n*Do)
-                    p_i  = fps_flat[idx_f].reshape(T, n_n*fps_dim) if fps_dim else \
-                           torch.zeros(T, 0, device=device)
+                    nx_i = x_N_Do[idx_n].reshape(1, n_n * Do)
+                    if fps_dim:
+                        p_i = fp_N_Dfp[idx_n].reshape(1, n_n * fps_dim)
+                    else:
+                        p_i = torch.zeros(1, 0, device=device)
                 else:
-                    nx_i = torch.zeros(T, 0, device=device); p_i = nx_i
+                    nx_i = torch.zeros(1, 0, device=device)
+                    p_i = nx_i
                 fc_x_in = torch.cat([x_i, nx_i], dim=1)
             else:
-                ns_i  = self.n_s_ls[i]
-                x_raw = obs_T_N_Do[:, i, :ns_i].reshape(T, ns_i)
+                ns_i = self.n_s_ls[i]
+                x_raw = x_N_Do[i, :ns_i].unsqueeze(0)
                 nx_i, p_i = [], []
                 for k, j in enumerate(idx_n):
-                    idx_f = (base + j).reshape(-1)
-                    nx_seg = obs_flat[idx_f][:, :self.ns_ls_ls[i][k]]
+                    nx_seg = x_N_Do[j, :self.ns_ls_ls[i][k]].unsqueeze(0)
                     nx_i.append(nx_seg)
                     if fps_dim:
-                        p_seg = fps_flat[idx_f][:, :self.na_ls_ls[i][k]]
+                        p_seg = fp_N_Dfp[j, :self.na_ls_ls[i][k]].unsqueeze(0)
                         p_i.append(p_seg)
-                nx_i = torch.cat(nx_i, dim=1) if nx_i else torch.zeros(T,0,device=device)
-                p_i  = torch.cat(p_i,  dim=1) if p_i else torch.zeros(T,0,device=device)
+                nx_i = torch.cat(nx_i, dim=1) if nx_i else torch.zeros(1, 0, device=device)
+                p_i = torch.cat(p_i, dim=1) if p_i else torch.zeros(1, 0, device=device)
                 fc_x_in = torch.cat([x_raw, nx_i], dim=1)
 
-            # -------- linear proj ----------
             s_x = F.relu(self._get_fc_x(i, n_n, fc_x_in.size(1))(fc_x_in))
-            s_p = F.relu(self.fc_p_layers[i](p_i)) if n_n and fps_dim else \
-                  torch.zeros(T, n_fc, device=device)
-            s_m = F.relu(self.fc_m_layers[i](m_i)) if n_n else \
-                  torch.zeros(T, n_fc, device=device)
+            if n_n and self.fc_p_layers[i] is not None:
+                if fps_dim == 0:
+                    p_i = torch.zeros(1, self.fc_p_layers[i].in_features, device=device)
+                s_p = F.relu(self.fc_p_layers[i](p_i))
+            else:
+                s_p = torch.zeros(1, n_fc, device=device)
+            s_m = F.relu(self.fc_m_layers[i](m_i)) if n_n else torch.zeros(1, n_fc, device=device)
             s_cat.append(torch.cat([s_x, s_p, s_m], dim=1))
 
-        s_T_N_3fc = torch.stack(s_cat, dim=1)
-        return s_T_N_3fc.reshape(T * N, 3 * n_fc)
+        return torch.cat(s_cat, dim=0)
 
 
     # ------------------------------------------------------------------#
@@ -602,44 +598,61 @@ class NCMultiAgentPolicy(nn.Module):
         fps_T_N_Dfp : (T,N,Dfp)
         """
         T, N, _ = obs_T_N_D.shape
-        h0, c0 = torch.chunk(states_N_2H, 2, dim=1)         # (N,H)
+        h0, c0 = torch.chunk(states_N_2H, 2, dim=1)  # (N,H)
+        dones_T_N = dones_T_N.float()
+        h = h0.clone(); c = c0.clone()
 
-        # ---------- feature + GAT ----------
-        s_flat = self._compute_s_features_flat(obs_T_N_D, fps_T_N_Dfp, h0)
-        s_flat = self._apply_gat(s_flat)
-        s_T_N_D = s_flat.view(T, N, -1)
-
-        # ---------- identical = shared LSTM ----------
         if self.identical:
-            # step-wise done-mask to保持舊行為  (P-1  fix)
             outs = []
-            h, c = h0.unsqueeze(0), c0.unsqueeze(0)          # (1,N,H)
             for t in range(T):
-                mask = (1.0 - dones_T_N[t]).view(1, N, 1)
-                h, c = h * mask, c * mask
-                out_t, (h, c) = self.shared_lstm(s_T_N_D[t:t+1], (h, c))
-                outs.append(out_t.squeeze(0))
-            lstm_out = torch.stack(outs, dim=1)              # (N,T,H)
-            new_state = torch.cat([h.squeeze(0), c.squeeze(0)], dim=1)
+                fp_t = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
+                s_flat_t = self._compute_s_features_flat_step(obs_T_N_D[t], fp_t, h)
+                s_after = self._apply_gat(s_flat_t)
 
-        # ---------- hetero = per-agent LSTM ----------
+                out_list, h_list, c_list = [], [], []
+                for i in range(N):
+                    m = 1.0 - dones_T_N[t, i].float()
+                    h_i = h[i:i+1] * m
+                    c_i = c[i:i+1] * m
+                    out_i, (h_i, c_i) = self.lstm_layers[i](
+                        s_after[i:i+1].view(1, 1, -1),
+                        (h_i.unsqueeze(0), c_i.unsqueeze(0))
+                    )
+                    out_list.append(out_i.squeeze())
+                    h_list.append(h_i.squeeze(0))
+                    c_list.append(c_i.squeeze(0))
+                h = torch.cat(h_list, dim=0)
+                c = torch.cat(c_list, dim=0)
+                outs.append(torch.stack(out_list, dim=0))
+
+            lstm_out = torch.stack(outs, dim=1)  # (N,T,H)
+            new_state = torch.cat([h, c], dim=1)
+
         else:
-            outs, h_list, c_list = [], [], []
-            for i in range(N):
-                seq_i = s_T_N_D[:, i, :].unsqueeze(1)        # (T,1,D)
-                h_i, c_i = h0[i:i+1].unsqueeze(0), c0[i:i+1].unsqueeze(0)
-                # step-wise mask
-                h_seq, c_seq, o_seq = [], [], []
-                for t in range(T):
-                    m_scalar = 1.0 - dones_T_N[t, i]
-                    h_i *= m_scalar
-                    c_i *= m_scalar
-                    o_t, (h_i, c_i) = self.lstm_layers[i](seq_i[t:t+1], (h_i, c_i))
-                    o_seq.append(o_t.squeeze())
-                outs.append(torch.stack(o_seq))               # (T,H)
-                h_list.append(h_i.squeeze(0)); c_list.append(c_i.squeeze(0))
-            lstm_out = torch.stack(outs, dim=0)               # (N,T,H)
-            new_state = torch.cat([torch.cat(h_list, dim=0), torch.cat(c_list, dim=0)], dim=1)
+            outs = []
+            for t in range(T):
+                fp_t = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
+                s_t = self._compute_s_features_flat_step(obs_T_N_D[t], fp_t, h)
+                s_t = self._apply_gat(s_t)
+
+                out_list, h_list, c_list = [], [], []
+                for i in range(N):
+                    m = 1.0 - dones_T_N[t, i].float()
+                    h_i = h[i:i+1] * m
+                    c_i = c[i:i+1] * m
+                    out_i, (h_i, c_i) = self.lstm_layers[i](
+                        s_t[i:i+1].view(1, 1, -1),
+                        (h_i.unsqueeze(0), c_i.unsqueeze(0))
+                    )
+                    out_list.append(out_i.squeeze())
+                    h_list.append(h_i.squeeze(0))
+                    c_list.append(c_i.squeeze(0))
+                h = torch.cat(h_list, dim=0)
+                c = torch.cat(c_list, dim=0)
+                outs.append(torch.stack(out_list, dim=0))
+
+            lstm_out = torch.stack(outs, dim=1)
+            new_state = torch.cat([h, c], dim=1)
 
         return lstm_out, new_state
 
@@ -711,9 +724,9 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
 
     def backward(self, obs, fps, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
+        obs = torch.from_numpy(obs).float().to(self.dev)
         dones_T_N = torch.from_numpy(dones).float().to(self.dev)
-        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        fps = torch.from_numpy(fps).float().to(self.dev)
         acts = torch.from_numpy(acts).long().to(self.dev)
 
         T, N = obs.size(0), self.n_agent
