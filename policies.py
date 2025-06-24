@@ -220,9 +220,27 @@ class NCMultiAgentPolicy(Policy):
         self.n_fc = n_fc
         self.n_h = n_h
         self._init_net()
+        self.dev = next(self.parameters()).device
         self._reset()
-        # allow ablation of GAT via env var
+        self.zero_pad = nn.Parameter(torch.zeros(1, 2*self.n_fc, device=self.dev), requires_grad=False)
+
+        adj = torch.tensor(self.neighbor_mask, dtype=torch.float32, device=self.dev)
+        adj = adj + torch.eye(adj.size(0), dtype=adj.dtype, device=self.dev)
+        self.register_buffer('adj', adj)
+        edge_index = torch.stack(torch.where(adj > 0), dim=0)
+        self.register_buffer('edge_index', edge_index)
+
+        self.neighbor_index_ls = []
+        for i in range(self.n_agent):
+            idx = torch.tensor(np.where(self.neighbor_mask[i])[0], dtype=torch.long, device=self.dev)
+            self.register_buffer(f'neighbor_index_{i}', idx)
+            self.neighbor_index_ls.append(idx)
+        self.latest_attention_scores = None
+
         self.use_gat = os.getenv('USE_GAT', '1') == '1'
+        self.use_layer_norm = False
+        self.use_residual = False
+        self.use_projection = False
         if not self.use_gat:
             self.gat_layer = nn.Identity()
 
@@ -403,6 +421,55 @@ class NCMultiAgentPolicy(Policy):
         s_T_N_3fc = torch.stack(s_cat_list, dim=1)
         return s_T_N_3fc.reshape(T * N, 3 * n_fc)
 
+    def _apply_gat(self, s_flat_TN_D: torch.Tensor) -> torch.Tensor:
+        """Apply GAT on batched node features."""
+        s_block_input = s_flat_TN_D
+        if self.use_gat and self.gat_layer is not None:
+            if s_flat_TN_D.numel() == 0:
+                return s_flat_TN_D
+            if self.use_layer_norm:
+                if not hasattr(self, 'pre_gat_ln'):
+                    self.pre_gat_ln = nn.LayerNorm(s_flat_TN_D.size(1)).to(self.dev)
+                s_input_for_gat = self.pre_gat_ln(s_block_input)
+            else:
+                s_input_for_gat = s_block_input
+
+            num_nodes_per_graph = self.n_agent
+            if s_input_for_gat.size(0) % num_nodes_per_graph != 0:
+                raise ValueError("s_flat_TN_D cannot be reshaped to (T,N,D) for batched GAT processing.")
+            num_graphs = s_input_for_gat.size(0) // num_nodes_per_graph
+
+            if not hasattr(self, '_edge_index_cache'):
+                self._edge_index_cache = {}
+            if num_graphs not in self._edge_index_cache:
+                edge_index_single = self.edge_index
+                edge_list = [edge_index_single + i * num_nodes_per_graph for i in range(num_graphs)]
+                self._edge_index_cache[num_graphs] = torch.cat(edge_list, dim=1)
+            batched_edge_index = self._edge_index_cache[num_graphs].to(s_input_for_gat.device)
+
+            adj = torch.zeros(s_input_for_gat.size(0), s_input_for_gat.size(0), device=s_input_for_gat.device)
+            adj[batched_edge_index[0], batched_edge_index[1]] = 1.0
+
+            s_after_gat, attention_scores = self.gat_layer(s_input_for_gat, adj)
+            self.latest_attention_scores = attention_scores.detach()
+
+            if self.use_projection:
+                if not hasattr(self, 'gat_output_projection'):
+                    self.gat_output_projection = nn.Linear(s_after_gat.size(1), s_block_input.size(1)).to(self.dev)
+                s_projected = self.gat_output_projection(s_after_gat)
+            else:
+                s_projected = s_after_gat
+
+            if self.use_residual:
+                s_all_processed_flat = s_block_input + s_projected
+            else:
+                s_all_processed_flat = s_projected
+        else:
+            s_all_processed_flat = s_block_input
+            if self.use_gat and self.gat_layer is None:
+                logging.error(f"[{self.name}] GAT layer specified (use_gat=True) but GAT layer object is None (likely due to import error or config).")
+        return s_all_processed_flat
+
     def _get_neighbor_dim(self, i_agent):
         n_n = int(np.sum(self.neighbor_mask[i_agent]))
         if self.identical:
@@ -499,61 +566,31 @@ class NCMultiAgentPolicy(Policy):
         obs = batch_to_seq(obs)
         dones = batch_to_seq(dones)
         fps = batch_to_seq(fps)
+        T, N, _ = obs.shape
         h, c = torch.chunk(states, 2, dim=1)
-        dev = next(self.parameters()).device
+        dev = self.dev
         h = h.to(dev)
         c = c.to(dev)
+
+        s_flat = self._compute_s_features_flat(obs, fps, h)
+        s_flat = self._apply_gat(s_flat)
+        s_all_T_N_D = s_flat.view(T, N, -1)
+
         outputs = []
-        ###每個time step做的事情
-        ####x 是此刻所有 agent 的觀測值，p 是此刻所有 agent 的 policy fingerprint，done 指示是否該 timestep 結束。
-        for t, (x, p, done) in enumerate(zip(obs, fps, dones)):
-            done = done.to(dev)
-            x = x.to(dev)
-            p = p.to(dev)
+        for t in range(T):
+            done = dones[t].to(dev)
+            s_all = s_all_T_N_D[t]
             next_h = []
             next_c = []
-            x = x.squeeze(0)
-            p = p.squeeze(0)
-            #####每個 agent 處理鄰居資訊並計算 LSTM 輸入
-            s_list = []
-            for i in range(self.n_agent):
-                n_n = self.n_n_ls[i]
-                ##若有鄰居 (n_n>0)，透過 _get_comm_s 組合自己和鄰居資訊（觀測值、hidden states、policy fingerprints）。
-                ##若無鄰居 (n_n=0)，直接使用自己的觀測值經過一層 FC 層（fully-connected layer）來產生 LSTM 輸入。
-                if n_n:
-                    s = self._get_comm_s(i, n_n, x, h, p)
-                else:
-                    if self.identical:
-                        x_i = x[i].unsqueeze(0)
-                    else:
-                        x_i = x[i].narrow(0, 0, self.n_s_ls[i]).unsqueeze(0)
-                    s_x = F.relu(self.fc_x_layers[i](x_i))
-                    # For agents with no neighbors, we still need to create a feature of the same size
-                    # Create zero tensors for the other parts to maintain consistent dimensions
-                    zeros_fc = torch.zeros((1, self.n_fc), device=x.device)
-                    s = torch.cat([s_x, zeros_fc, zeros_fc], dim=1)
-                s_list.append(s.squeeze(0))
-            
-            # Stack all features and apply GAT
-            s_all = torch.stack(s_list, dim=0)  # shape: [n_agent, 3*n_fc]
-            
-            # Use the pre-computed adjacency matrix
-            adj = self.adj.to(x.device)
-            
-            if self.use_gat:
-                s_all = self.gat_layer(s_all, adj)
-            
-            # Use the (unmodified) features to update LSTM states
             for i in range(self.n_agent):
                 s_i = s_all[i].unsqueeze(0)
-                h_i, c_i = h[i].unsqueeze(0) * (1-done), c[i].unsqueeze(0) * (1-done)
+                h_i, c_i = h[i].unsqueeze(0) * (1 - done[i]), c[i].unsqueeze(0) * (1 - done[i])
                 next_h_i, next_c_i = self.lstm_layers[i](s_i, (h_i, c_i))
                 next_h.append(next_h_i)
                 next_c.append(next_c_i)
-            
             h, c = torch.cat(next_h), torch.cat(next_c)
             outputs.append(h.unsqueeze(0))
-        
+
         outputs = torch.cat(outputs)
         return outputs.transpose(0, 1), torch.cat([h, c], dim=1)
 
