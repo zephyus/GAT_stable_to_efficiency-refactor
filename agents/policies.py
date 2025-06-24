@@ -332,7 +332,7 @@ class NCMultiAgentPolicy(nn.Module):
         else:
             dones_T_N = torch.from_numpy(dones_np).float().to(self.dev)
         fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
-        acts = torch.from_numpy(acts).long().to(self.dev)
+        acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
 
         # Forward pass through communication layers
         T, N = obs.size(0), self.n_agent
@@ -727,7 +727,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
         dones_T_N = torch.from_numpy(dones).float().to(self.dev)
         fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
-        acts = torch.from_numpy(acts).long().to(self.dev)
+        acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
 
         T, N = obs.size(0), self.n_agent
         dones_T_N = self._ensure_TN(dones_T_N, T, N, "dones")
