@@ -35,10 +35,13 @@ def run_rnn(layer, xs, dones, s):
     n_out = int(s.shape[0]) // 2
     s = torch.unsqueeze(s, 0)
     h, c = torch.chunk(s, 2, dim=1)
-    h = h.cuda()
-    c = c.cuda()
+    dev = xs[0].device
+    h = h.to(dev)
+    c = c.to(dev)
     outputs = []
     for ind, (x, done) in enumerate(zip(xs, dones)):
+        done = done.to(dev)
+        x = x.to(dev)
         c = c * (1-done)
         h = h * (1-done)
         h, c = layer(x, (h, c))
@@ -53,7 +56,7 @@ def one_hot(x, oh_dim, dim=-1):
         oh_shape.append(oh_dim)
     else:
         oh_shape = oh_shape[:dim+1] + [oh_dim] + oh_shape[dim+1:]
-    x_oh = torch.zeros(oh_shape)
+    x_oh = torch.zeros(oh_shape, device=x.device)
     x = torch.unsqueeze(x, -1)
     if dim == -1:
         x_oh = x_oh.scatter(dim, x, 1)
