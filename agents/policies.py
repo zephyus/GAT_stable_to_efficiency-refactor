@@ -325,13 +325,13 @@ class NCMultiAgentPolicy(nn.Module):
                  e_coef, v_coef, summary_writer=None, global_step=None):
         """Training backward pass for computing losses and gradients."""
         # Convert inputs to tensors and move to device
-        obs = torch.from_numpy(obs).float().to(self.dev)
+        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
         dones_np = np.asarray(dones)
         if dones_np.ndim == 1:
             dones_T_N = torch.from_numpy(dones_np).float().unsqueeze(-1).expand(-1, self.n_agent).to(self.dev)
         else:
             dones_T_N = torch.from_numpy(dones_np).float().to(self.dev)
-        fps = torch.from_numpy(fps).float().to(self.dev)
+        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
         acts = torch.from_numpy(acts).long().to(self.dev)
 
         # Forward pass through communication layers
@@ -724,9 +724,9 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
 
     def backward(self, obs, fps, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        obs = torch.from_numpy(obs).float().to(self.dev)
+        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
         dones_T_N = torch.from_numpy(dones).float().to(self.dev)
-        fps = torch.from_numpy(fps).float().to(self.dev)
+        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
         acts = torch.from_numpy(acts).long().to(self.dev)
 
         T, N = obs.size(0), self.n_agent
