@@ -14,3 +14,9 @@
 __pycache__/
 *.pyc
 *.pyo
+final_summary_report.py
+final_verification_report.py
+gat_dropout_verification.py
+simple_gat_test.py
+simple_verify.py
+verify_gat_dropout.py

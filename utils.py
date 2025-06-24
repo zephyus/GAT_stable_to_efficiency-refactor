@@ -52,12 +52,35 @@ def init_log(log_file=None):
     for handler in logging.root.handlers[:]:
         logging.root.removeHandler(handler)
 
-    # Set basic config - this sets up a StreamHandler directed to stdout
-    logging.basicConfig(
-        level=log_level,
-        format=log_format,
-        stream=sys.stdout # Explicitly set stream to stdout
-    )
+    # Create a custom handler that handles encoding issues
+    import sys
+    import io
+    
+    class UTF8Handler(logging.StreamHandler):
+        def emit(self, record):
+            try:
+                msg = self.format(record)
+                stream = self.stream
+                # Try to write with UTF-8, fallback to errors='replace' if needed
+                try:
+                    stream.write(msg + self.terminator)
+                except UnicodeEncodeError:
+                    # Fallback: encode with errors='replace' and decode back
+                    msg_bytes = msg.encode('utf-8', errors='replace')
+                    msg_safe = msg_bytes.decode('utf-8')
+                    stream.write(msg_safe + self.terminator)
+                self.flush()
+            except Exception:
+                self.handleError(record)
+    
+    # Create and configure the handler
+    handler = UTF8Handler(sys.stdout)
+    handler.setFormatter(logging.Formatter(log_format))
+    
+    # Configure the root logger
+    root_logger = logging.getLogger()
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(handler)
 
     # Ensure FileHandler remains commented out/inactive
     # if log_file:
