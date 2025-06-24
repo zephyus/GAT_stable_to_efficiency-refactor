@@ -327,9 +327,10 @@ class NCMultiAgentPolicy(Policy):
             self.fc_m_layers.append(None)
             self.fc_p_layers.append(None)
         
-        lstm_layer = nn.LSTMCell(3 * self.n_fc, self.n_h)
-        init_layer(lstm_layer, 'lstm')
-        self.lstm_layers.append(lstm_layer)
+        if not self.identical:
+            lstm_layer = nn.LSTM(3 * self.n_fc, self.n_h, num_layers=1)
+            init_layer(lstm_layer, 'lstm')
+            self.lstm_layers.append(lstm_layer)
 
     def _init_critic_head(self, n_na):
         critic_head = nn.Linear(self.n_h + n_na, 1)
@@ -340,7 +341,11 @@ class NCMultiAgentPolicy(Policy):
         self.fc_x_layers = nn.ModuleDict()
         self.fc_p_layers = nn.ModuleList()
         self.fc_m_layers = nn.ModuleList()
-        self.lstm_layers = nn.ModuleList()
+        if self.identical:
+            self.lstm_layer = nn.LSTM(3 * self.n_fc, self.n_h, num_layers=1)
+            init_layer(self.lstm_layer, 'lstm')
+        else:
+            self.lstm_layers = nn.ModuleList()
         self.actor_heads = nn.ModuleList()
         self.critic_heads = nn.ModuleList()
         self.ns_ls_ls = []
@@ -389,23 +394,29 @@ class NCMultiAgentPolicy(Policy):
         s_flat = self._apply_gat(s_flat)
         s_all_T_N_D = s_flat.view(T, N, -1)
 
-        outputs = []
-        for t in range(T):
-            done = dones[t].to(self.dev)
-            s_all = s_all_T_N_D[t]
-            next_h = []
-            next_c = []
+        if self.identical:
+            out_seq, (hn, cn) = self.lstm_layer(
+                s_all_T_N_D,
+                (h.unsqueeze(0), c.unsqueeze(0))
+            )
+            outputs = out_seq.transpose(0, 1)
+            new_states = torch.cat([hn.squeeze(0), cn.squeeze(0)], dim=1)
+        else:
+            out_list = []
+            hn_list = []
+            cn_list = []
             for i in range(self.n_agent):
-                s_i = s_all[i].unsqueeze(0)
-                h_i, c_i = h[i].unsqueeze(0) * (1 - done[i]), c[i].unsqueeze(0) * (1 - done[i])
-                next_h_i, next_c_i = self.lstm_layers[i](s_i, (h_i, c_i))
-                next_h.append(next_h_i)
-                next_c.append(next_c_i)
-            h, c = torch.cat(next_h), torch.cat(next_c)
-            outputs.append(h.unsqueeze(0))
+                seq_i = s_all_T_N_D[:, i, :].unsqueeze(1)
+                h_i = h[i].unsqueeze(0).unsqueeze(0)
+                c_i = c[i].unsqueeze(0).unsqueeze(0)
+                out_i, (hn_i, cn_i) = self.lstm_layers[i](seq_i, (h_i, c_i))
+                out_list.append(out_i.squeeze(1).unsqueeze(0))
+                hn_list.append(hn_i.squeeze(0).squeeze(0))
+                cn_list.append(cn_i.squeeze(0).squeeze(0))
+            outputs = torch.cat(out_list, dim=0)  # (N, T, H)
+            new_states = torch.cat([torch.stack(hn_list), torch.stack(cn_list)], dim=1)
 
-        outputs = torch.cat(outputs)
-        return outputs.transpose(0, 1), torch.cat([h, c], dim=1)
+        return outputs, new_states
 
     def _run_critic_heads(self, hs, actions, detach=False):
         vs = []
@@ -652,9 +663,10 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         else:
             self.fc_m_layers.append(None)
             self.fc_p_layers.append(None)
-        lstm_layer = nn.LSTMCell(n_lstm_in, self.n_h)
-        init_layer(lstm_layer, 'lstm')
-        self.lstm_layers.append(lstm_layer)
+        if not self.identical:
+            lstm_layer = nn.LSTM(n_lstm_in, self.n_h, num_layers=1)
+            init_layer(lstm_layer, 'lstm')
+            self.lstm_layers.append(lstm_layer)
 
     def _init_backhand_actor_head(self, n_a, n_na):
         actor_head = nn.Linear(self.n_h + n_na, n_a)
@@ -665,7 +677,11 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         self.fc_x_layers = nn.ModuleDict()
         self.fc_p_layers = nn.ModuleList()
         self.fc_m_layers = nn.ModuleList()
-        self.lstm_layers = nn.ModuleList()
+        if self.identical:
+            self.lstm_layer = nn.LSTM(3 * self.n_fc, self.n_h, num_layers=1)
+            init_layer(self.lstm_layer, 'lstm')
+        else:
+            self.lstm_layers = nn.ModuleList()
         self.actor_heads = nn.ModuleList()
         self.critic_heads = nn.ModuleList()
         self.ns_ls_ls = []
@@ -749,9 +765,10 @@ class ConsensusPolicy(NCMultiAgentPolicy):
             n_s = self.n_s if self.identical else self.n_s_ls[i]
             self.na_ls_ls.append(na_ls)
             self.n_n_ls.append(n_n)
-            lstm_layer = nn.LSTMCell(self.n_fc, self.n_h)
-            init_layer(lstm_layer, 'lstm')
-            self.lstm_layers.append(lstm_layer)
+            if not self.identical:
+                lstm_layer = nn.LSTM(self.n_fc, self.n_h, num_layers=1)
+                init_layer(lstm_layer, 'lstm')
+                self.lstm_layers.append(lstm_layer)
             n_a = self.n_a if self.identical else self.n_a_ls[i]
             self._init_actor_head(n_a)
             self._init_critic_head(n_na)
@@ -801,9 +818,10 @@ class CommNetMultiAgentPolicy(NCMultiAgentPolicy):
             self.fc_m_layers.append(fc_m_layer)
         else:
             self.fc_m_layers.append(None)
-        lstm_layer = nn.LSTMCell(self.n_fc, self.n_h)
-        init_layer(lstm_layer, 'lstm')
-        self.lstm_layers.append(lstm_layer)
+        if not self.identical:
+            lstm_layer = nn.LSTM(self.n_fc, self.n_h, num_layers=1)
+            init_layer(lstm_layer, 'lstm')
+            self.lstm_layers.append(lstm_layer)
 
     def _get_comm_s(self, i, n_n, x, h, p):
         h = h.to(self.dev)
@@ -848,9 +866,10 @@ class DIALMultiAgentPolicy(NCMultiAgentPolicy):
             self.fc_m_layers.append(fc_m_layer)
         else:
             self.fc_m_layers.append(None)
-        lstm_layer = nn.LSTMCell(self.n_fc, self.n_h)
-        init_layer(lstm_layer, 'lstm')
-        self.lstm_layers.append(lstm_layer)
+        if not self.identical:
+            lstm_layer = nn.LSTM(self.n_fc, self.n_h, num_layers=1)
+            init_layer(lstm_layer, 'lstm')
+            self.lstm_layers.append(lstm_layer)
 
     def _get_comm_s(self, i, n_n, x, h, p):
         js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
