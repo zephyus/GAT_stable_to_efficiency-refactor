@@ -45,7 +45,7 @@ class Policy(nn.Module):
         if n_n is None:
             n_n = int(self.n_n)
         if n_n:
-            na = torch.from_numpy(na).long()
+            na = torch.from_numpy(na).long().to(next(self.parameters()).device)
             if self.identical:
                 na_sparse = one_hot(na, self.n_a)
                 na_sparse = na_sparse.view(-1, self.n_a * n_n)
@@ -55,13 +55,14 @@ class Policy(nn.Module):
                 for na_val, na_dim in zip(na_ls, self.na_dim_ls):
                     na_sparse.append(torch.squeeze(one_hot(na_val, na_dim), dim=1))
                 na_sparse = torch.cat(na_sparse, dim=1)
-            h = torch.cat([h, na_sparse.cuda()], dim=1)
+            h = torch.cat([h, na_sparse.to(next(self.parameters()).device)], dim=1)
         return self.critic_head(h).squeeze()
 
     def _run_loss(self, actor_dist, e_coef, v_coef, vs, As, Rs, Advs):
-        As = As.cuda()
-        Advs = Advs.cuda()
-        Rs = Rs.cuda()
+        dev = next(self.parameters()).device
+        As = As.to(dev)
+        Advs = Advs.to(dev)
+        Rs = Rs.to(dev)
         log_probs = actor_dist.log_prob(As)
         policy_loss = -(log_probs * Advs).mean()
         entropy_loss = -(actor_dist.entropy()).mean() * e_coef
@@ -93,10 +94,8 @@ class LstmPolicy(Policy):
 
     def backward(self, obs, nactions, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        obs = torch.from_numpy(obs).float()
-        dones = torch.from_numpy(dones).float()
-        obs = obs.cuda()
-        dones = dones.cuda()
+        obs = torch.from_numpy(obs).float().to(next(self.parameters()).device)
+        dones = torch.from_numpy(dones).float().to(next(self.parameters()).device)
         xs = self._encode_ob(obs)
         hs, new_states = run_rnn(self.lstm_layer, xs, dones, self.states_bw)
         self.states_bw = new_states.detach()
@@ -104,17 +103,18 @@ class LstmPolicy(Policy):
         vs = self._run_critic_head(hs, nactions)
         self.policy_loss, self.value_loss, self.entropy_loss = \
             self._run_loss(actor_dist, e_coef, v_coef, vs,
-                           torch.from_numpy(acts).long(),
-                           torch.from_numpy(Rs).float(),
-                           torch.from_numpy(Advs).float())
+                           torch.from_numpy(acts).long().to(next(self.parameters()).device),
+                           torch.from_numpy(Rs).float().to(next(self.parameters()).device),
+                           torch.from_numpy(Advs).float().to(next(self.parameters()).device))
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
     def forward(self, ob, done, naction=None, out_type='p'):
-        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().cuda()
-        done = torch.from_numpy(np.expand_dims(done, axis=0)).float().cuda()
+        dev = next(self.parameters()).device
+        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().to(dev)
+        done = torch.from_numpy(np.expand_dims(done, axis=0)).float().to(dev)
         x = self._encode_ob(ob)
         h, new_states = run_rnn(self.lstm_layer, x, done, self.states_fw)
         if out_type.startswith('p'):
@@ -183,8 +183,14 @@ class NCMultiAgentPolicy(Policy):
         self.n_h = n_h
         self.model_config = model_config
         self._init_net()
+        # device where module parameters reside
+        self.dev = next(self.parameters()).device
         self._reset()
-        self.zero_pad = nn.Parameter(torch.zeros(1, 2*self.n_fc), requires_grad=False)
+        self.zero_pad = nn.Parameter(torch.zeros(1, 2*self.n_fc, device=self.dev), requires_grad=False)
+        # cache adjacency matrix
+        adj = torch.tensor(self.neighbor_mask, dtype=torch.float32, device=self.dev)
+        adj = adj + torch.eye(adj.size(0), dtype=adj.dtype, device=self.dev)
+        self.register_buffer('adj', adj)
         self.latest_attention_scores = None
         
         use_gat_env_value = os.getenv('USE_GAT', '1')
@@ -201,10 +207,10 @@ class NCMultiAgentPolicy(Policy):
 
     def backward(self, obs, fps, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        obs = torch.from_numpy(obs).float().transpose(0, 1)
-        dones = torch.from_numpy(dones).float()
-        fps = torch.from_numpy(fps).float().transpose(0, 1)
-        acts = torch.from_numpy(acts).long()
+        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
+        dones = torch.from_numpy(dones).float().to(self.dev)
+        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        acts = torch.from_numpy(acts).long().to(self.dev)
         hs, new_states = self._run_comm_layers(obs, dones, fps, self.states_bw)
         self.states_bw = new_states.detach()
         ps = self._run_actor_heads(hs)
@@ -212,8 +218,8 @@ class NCMultiAgentPolicy(Policy):
         self.policy_loss = 0
         self.value_loss = 0
         self.entropy_loss = 0
-        Rs = torch.from_numpy(Rs).float()
-        Advs = torch.from_numpy(Advs).float()
+        Rs = torch.from_numpy(Rs).float().to(self.dev)
+        Advs = torch.from_numpy(Advs).float().to(self.dev)
         for i in range(self.n_agent):
             actor_dist_i = torch.distributions.categorical.Categorical(logits=ps[i])
             policy_loss_i, value_loss_i, entropy_loss_i = \
@@ -234,22 +240,22 @@ class NCMultiAgentPolicy(Policy):
                 self.latest_attention_scores = None
 
     def forward(self, ob, done, fp, action=None, out_type='p'):
-        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float()
-        done = torch.from_numpy(np.expand_dims(done, axis=0)).float()
-        fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
+        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().to(self.dev)
+        done = torch.from_numpy(np.expand_dims(done, axis=0)).float().to(self.dev)
+        fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float().to(self.dev)
         h, new_states = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
             self.states_fw = new_states.detach()
             return self._run_actor_heads(h, detach=True)
         else:
-            action = torch.from_numpy(np.expand_dims(action, axis=1)).long()
+            action = torch.from_numpy(np.expand_dims(action, axis=1)).long().to(self.dev)
             return self._run_critic_heads(h, action, detach=True)
 
     def _get_comm_s(self, i, n_n, x, h, p):
-        h = h.cuda()
-        x = x.cuda()
-        p = p.cuda()
-        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().cuda()
+        h = h.to(self.dev)
+        x = x.to(self.dev)
+        p = p.to(self.dev)
+        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
         m_i = torch.index_select(h, 0, js).view(1, self.n_h * n_n)
         p_i = torch.index_select(p, 0, js)
         nx_i = torch.index_select(x, 0, js)
@@ -330,8 +336,6 @@ class NCMultiAgentPolicy(Policy):
             gat_dropout_init = self.model_config.getfloat('gat_dropout_init', 0.2)
         self.gat_layer = GraphAttention(3 * self.n_fc, 3 * self.n_fc,
                                         dropout=gat_dropout_init, alpha=0.2)
-        self.adj = torch.tensor(self.neighbor_mask, dtype=torch.float32)
-        self.adj = self.adj + torch.eye(self.adj.size(0), dtype=self.adj.dtype)
         
         for i in range(self.n_agent):
             n_n, n_ns, n_na, ns_ls, na_ls = self._get_neighbor_dim(i)
@@ -344,8 +348,8 @@ class NCMultiAgentPolicy(Policy):
             self._init_critic_head(n_na)
 
     def _reset(self):
-        self.states_fw = torch.zeros(self.n_agent, self.n_h * 2)
-        self.states_bw = torch.zeros(self.n_agent, self.n_h * 2)
+        self.states_fw = torch.zeros(self.n_agent, self.n_h * 2, device=self.dev)
+        self.states_bw = torch.zeros(self.n_agent, self.n_h * 2, device=self.dev)
 
     def _run_actor_heads(self, hs, detach=False):
         ps = []
@@ -362,13 +366,13 @@ class NCMultiAgentPolicy(Policy):
         dones = batch_to_seq(dones)
         fps = batch_to_seq(fps)
         h, c = torch.chunk(states, 2, dim=1)
-        h = h.cuda()
-        c = c.cuda()
+        h = h.to(self.dev)
+        c = c.to(self.dev)
         outputs = []
         for t, (x, p, done) in enumerate(zip(obs, fps, dones)):
-            done = done.cuda()
-            x = x.cuda()
-            p = p.cuda()
+            done = done.to(self.dev)
+            x = x.to(self.dev)
+            p = p.to(self.dev)
             next_h = []
             next_c = []
             x = x.squeeze(0)
@@ -418,11 +422,11 @@ class NCMultiAgentPolicy(Policy):
         for i in range(self.n_agent):
             n_n = self.n_n_ls[i]
             if n_n:
-                js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long()
+                js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
                 na_i = torch.index_select(actions, 0, js)
                 na_i_ls = []
                 for j in range(n_n):
-                    na_i_ls.append(one_hot(na_i[j], self.na_ls_ls[i][j]).cuda())
+                    na_i_ls.append(one_hot(na_i[j], self.na_ls_ls[i][j]).to(self.dev))
                 h_i = torch.cat([hs[i]] + na_i_ls, dim=1)
             else:
                 h_i = hs[i]
@@ -465,10 +469,10 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
 
     def backward(self, obs, fps, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        obs = torch.from_numpy(obs).float().transpose(0, 1)
-        dones = torch.from_numpy(dones).float()
-        fps = torch.from_numpy(fps).float().transpose(0, 1)
-        acts = torch.from_numpy(acts).long()
+        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
+        dones = torch.from_numpy(dones).float().to(self.dev)
+        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        acts = torch.from_numpy(acts).long().to(self.dev)
         hs, new_states = self._run_comm_layers(obs, dones, fps, self.states_bw)
         self.states_bw = new_states.detach()
         ps = self._run_actor_heads(hs)
@@ -481,8 +485,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         self.policy_loss = 0
         self.value_loss = 0
         self.entropy_loss = 0
-        Rs = torch.from_numpy(Rs).float()
-        Advs = torch.from_numpy(Advs).float()
+        Rs = torch.from_numpy(Rs).float().to(self.dev)
+        Advs = torch.from_numpy(Advs).float().to(self.dev)
         for i in range(self.n_agent):
             actor_dist_i = torch.distributions.categorical.Categorical(logits=ps[i])
             policy_loss_i, value_loss_i, entropy_loss_i = \
@@ -497,17 +501,17 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
             self._update_tensorboard(summary_writer, global_step)
 
     def forward(self, ob, done, fp, action=None, out_type='p'):
-        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float()
-        done = torch.from_numpy(np.expand_dims(done, axis=0)).float()
-        fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
+        ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().to(self.dev)
+        done = torch.from_numpy(np.expand_dims(done, axis=0)).float().to(self.dev)
+        fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float().to(self.dev)
         h, new_states = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
             self.states_fw = new_states.detach()
             if (np.array(action) != None).all():
-                action = torch.from_numpy(np.expand_dims(action, axis=1)).long()
+                action = torch.from_numpy(np.expand_dims(action, axis=1)).long().to(self.dev)
             return self._run_actor_heads(h, action, detach=True)
         else:
-            action = torch.from_numpy(np.expand_dims(action, axis=1)).long()
+            action = torch.from_numpy(np.expand_dims(action, axis=1)).long().to(self.dev)
             return self._run_critic_heads(h, action, detach=True)
 
     def _init_comm_layer(self, n_n, n_ns, n_na):
@@ -569,11 +573,11 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                 if i in self.groups:
                     n_n = self.n_n_ls[i]
                     if n_n:
-                        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long()
+                        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
                         na_i = torch.index_select(preactions, 0, js)
                         na_i_ls = []
                         for j in range(n_n):
-                            na_i_ls.append(one_hot(na_i[j], self.na_ls_ls[i][j]).cuda())
+                            na_i_ls.append(one_hot(na_i[j], self.na_ls_ls[i][j]).to(self.dev))
                         h_i = torch.cat([hs[i]] + na_i_ls, dim=1)
                     else:
                         h_i = hs[i]
@@ -676,10 +680,10 @@ class CommNetMultiAgentPolicy(NCMultiAgentPolicy):
         self.lstm_layers.append(lstm_layer)
 
     def _get_comm_s(self, i, n_n, x, h, p):
-        h = h.cuda()
-        x = x.cuda()
-        p = p.cuda()
-        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().cuda()
+        h = h.to(self.dev)
+        x = x.to(self.dev)
+        p = p.to(self.dev)
+        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
         m_i = torch.index_select(h, 0, js).mean(dim=0, keepdim=True)
         nx_i = torch.index_select(x, 0, js)
         if self.identical:
@@ -723,9 +727,9 @@ class DIALMultiAgentPolicy(NCMultiAgentPolicy):
         self.lstm_layers.append(lstm_layer)
 
     def _get_comm_s(self, i, n_n, x, h, p):
-        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().cuda()
-        m_i = torch.index_select(h, 0, js).view(1, self.n_h * n_n).cuda()
-        nx_i = torch.index_select(x, 0, js).cuda()
+        js = torch.from_numpy(np.where(self.neighbor_mask[i])[0]).long().to(self.dev)
+        m_i = torch.index_select(h, 0, js).view(1, self.n_h * n_n).to(self.dev)
+        nx_i = torch.index_select(x, 0, js).to(self.dev)
         if self.identical:
             nx_i = nx_i.view(1, self.n_s * n_n)
             x_i = x[i].unsqueeze(0)
@@ -735,7 +739,7 @@ class DIALMultiAgentPolicy(NCMultiAgentPolicy):
                 nx_i_ls.append(nx_i[j].narrow(0, 0, self.ns_ls_ls[i][j]))
             nx_i = torch.cat(nx_i_ls).unsqueeze(0)
             x_i = x[i].narrow(0, 0, self.n_s_ls[i]).unsqueeze(0)
-        a_i = one_hot(p[i].argmax().unsqueeze(0).cpu(), self.n_fc).cuda()
+        a_i = one_hot(p[i].argmax().unsqueeze(0).cpu(), self.n_fc).to(self.dev)
         fc_x_input = torch.cat([x_i, nx_i], dim=1)
         current_n_ns = fc_x_input.size(1)
         fc_x = self._get_fc_x(i, n_n, current_n_ns)
