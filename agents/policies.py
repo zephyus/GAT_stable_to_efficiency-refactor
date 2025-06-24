@@ -111,6 +111,7 @@ class LstmPolicy(Policy):
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
+    @torch.no_grad()
     def forward(self, ob, done, naction=None, out_type='p'):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().to(self.dev)
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float().to(self.dev)
@@ -256,6 +257,7 @@ class NCMultiAgentPolicy(Policy):
                     summary_writer.add_histogram('GAT/attention_scores', scores.cpu().numpy(), global_step)
                 self.latest_attention_scores = None
 
+    @torch.no_grad()
     def forward(self, ob, done, fp, action=None, out_type='p'):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().to(self.dev)
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float().to(self.dev)
@@ -394,25 +396,42 @@ class NCMultiAgentPolicy(Policy):
         s_all_T_N_D = s_flat.view(T, N, -1)
 
         if self.identical:
-            out_seq, (hn, cn) = self.lstm_layer(
-                s_all_T_N_D,
-                (h.unsqueeze(0), c.unsqueeze(0))
-            )
+            h_t = h.unsqueeze(0)
+            c_t = c.unsqueeze(0)
+            outputs_list = []
+            for t in range(T):
+                mask = (1.0 - dones[t].float()).view(1, N, 1)
+                h_t = h_t * mask
+                c_t = c_t * mask
+                out_step, (h_t, c_t) = self.lstm_layer(
+                    s_all_T_N_D[t:t+1], (h_t, c_t)
+                )
+                outputs_list.append(out_step)
+            out_seq = torch.cat(outputs_list, dim=0)
             outputs = out_seq.transpose(0, 1)
-            new_states = torch.cat([hn.squeeze(0), cn.squeeze(0)], dim=1)
+            new_states = torch.cat([h_t.squeeze(0), c_t.squeeze(0)], dim=1)
         else:
             out_list = []
             hn_list = []
             cn_list = []
             for i in range(self.n_agent):
-                seq_i = s_all_T_N_D[:, i, :].unsqueeze(1)
-                h_i = h[i].unsqueeze(0).unsqueeze(0)
-                c_i = c[i].unsqueeze(0).unsqueeze(0)
-                out_i, (hn_i, cn_i) = self.lstm_layers[i](seq_i, (h_i, c_i))
-                out_list.append(out_i.squeeze(1).unsqueeze(0))
-                hn_list.append(hn_i.squeeze(0).squeeze(0))
-                cn_list.append(cn_i.squeeze(0).squeeze(0))
-            outputs = torch.cat(out_list, dim=0)  # (N, T, H)
+                seq_i = s_all_T_N_D[:, i, :]
+                h_i = h[i].unsqueeze(0)
+                c_i = c[i].unsqueeze(0)
+                steps = []
+                for t in range(T):
+                    mask = (1.0 - dones[t, i].float()).view(1, 1)
+                    h_i = h_i * mask
+                    c_i = c_i * mask
+                    out_step, (h_i, c_i) = self.lstm_layers[i](
+                        seq_i[t:t+1].unsqueeze(0), (h_i.unsqueeze(0), c_i.unsqueeze(0))
+                    )
+                    steps.append(out_step.squeeze(0))
+                out_i = torch.cat(steps, dim=0).unsqueeze(0)
+                out_list.append(out_i)
+                hn_list.append(h_i.squeeze(0))
+                cn_list.append(c_i.squeeze(0))
+            outputs = torch.cat(out_list, dim=0)
             new_states = torch.cat([torch.stack(hn_list), torch.stack(cn_list)], dim=1)
 
         return outputs, new_states
