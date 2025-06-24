@@ -353,8 +353,8 @@ class NCMultiAgentPolicy(nn.Module):
         self.entropy_loss = 0
         
         # Convert advantage and reward tensors
-        Rs = torch.from_numpy(Rs).float().to(self.dev)
-        Advs = torch.from_numpy(Advs).float().to(self.dev)
+        Rs = torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev)
+        Advs = torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev)
         
         # Compute losses for each agent
         for i in range(self.n_agent):
@@ -744,13 +744,13 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         self.policy_loss = 0
         self.value_loss = 0
         self.entropy_loss = 0
-        Rs = torch.from_numpy(Rs).float()
-        Advs = torch.from_numpy(Advs).float()
+        Rs = torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev)
+        Advs = torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev)
         for i in range(self.n_agent):
             actor_dist_i = torch.distributions.categorical.Categorical(logits=ps[i])
             policy_loss_i, value_loss_i, entropy_loss_i = \
                 self._run_loss(actor_dist_i, e_coef, v_coef, vs[i],
-                    acts[i], Rs[i], Advs[i])
+                    acts[:, i], Rs[:, i], Advs[:, i])
             self.policy_loss += policy_loss_i
             self.value_loss += value_loss_i
             self.entropy_loss += entropy_loss_i
