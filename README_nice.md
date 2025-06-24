@@ -29,11 +29,20 @@ docker build -t best_environment:latest .
     docker run \
       --gpus all \
       -d \
-      --name Russell_Trainer_0417 \
+      --name Russell_Trainer_0503 \
       -v /home/russell512/my_deeprl_network_ori_test:/workspace/my_deeprl_network \
       best_environment:latest \
       sleep infinity
     ```
+    ***掛不同的資料夾的範例***
+    docker run \
+    --gpus all \
+    -d \
+    --name Trainer_Exp2_Config2 \
+    -v /home/russell512/my_deeprl_network_ori_test_0424_v0_Ablation_dp_decay:/workspace/my_deeprl_network \
+    best_environment:latest \
+    sleep infinity
+
     * 上面都沒問題，就是跑不同的資料夾(/home/russell512/my_deeprl_network_ori_test)中的程式碼，可能要改一下-v的資料夾名稱這樣
     * `-d`: Detached 模式，讓容器在背景運行。 
     * `--name Russell_Trainer_0417`: 給容器取一個固定且易於識別的名稱。
@@ -83,8 +92,14 @@ docker build -t best_environment:latest .
     tmux new -s training_session_0417
     ```
 * **在新的 `tmux` 視窗中**，執行您的訓練指令：
+<!-- 注意：
+使用不同的 --base-dir (例如 exp2_config_0.3_decay)。
+使用不同的 --port (例如 196)。
+使用第二個實驗的設定檔。 
+-->
 *全部輸出都到log
-
+ 
+    ```
 export USE_GAT=1
 python3 test.py \
   --base-dir real_a1/dp_decay \
@@ -93,6 +108,25 @@ python3 test.py \
   --config-dir config/config_ma2c_nc_net_ten_times.ini \
   > real_a1/dp_decay/log/training_gat1_dp_decay_$(date +%Y%m%d_%H%M%S).log 2>&1
 
+
+export USE_GAT=1
+python3 test.py \
+  --base-dir real_a1/dp_0.3_decay_0503 \
+  --port 196 \
+  train \
+  --config-dir config/config_ma2c_nc_net_exp_0503_drop_decay_0.3_.ini \
+  > real_a1/dp_0.3_decay_0503/log/training_exp2_$(date +%Y%m%d_%H%M%S).log 2>&1
+
+mkdir -p real_a1/dp_0.23_decay_0504/log
+
+# (在第三個容器的 tmux 會話中執行)
+export USE_GAT=1
+python3 test.py \
+  --base-dir real_a1/dp_0.23_decay_0504 \
+  --port 197 \
+  train \
+  --config-dir config/config_ma2c_nc_net_exp_0503_drop_decay_0.23_.ini \
+  > real_a1/dp_0.23_decay_0504/log/training_exp3_$(date +%Y%m%d_%H%M%S).log 2>&1
     ```
 * 確認訓練腳本已經開始運行並輸出日誌。
 
@@ -103,6 +137,9 @@ python3 test.py \
 
 **第 7 步：退出容器的 exec 連線**
 
+**一定要斷開，不然SSH斷掉整個訓練就bye了**
+
+
 * 在容器的命令提示符下，輸入 `exit` 並按 Enter。
 * 您會回到主機的命令提示符 (`(base) $` 或其他)。
 
@@ -111,6 +148,9 @@ python3 test.py \
 * **現在您可以安全地關閉 SSH 連線或 VS Code 了。**
 * 由於容器是以 `-d` 模式和 `sleep infinity` 啟動的，它會一直在背景運行，容器內的 `tmux` 會話 (`training_session_0417`) 和 Python 腳本也會繼續執行。
 
+
+
+
 **第 9 步：如何重新連線查看進度**
 
 1.  重新透過 SSH 登入您的主機。
@@ -118,6 +158,13 @@ python3 test.py \
 3.  在容器內，執行 `tmux attach -t training_session_0417` 重新連接到您的 `tmux` 會話查看訓練情況。
 4.  查看完畢後，可以再次用 `Ctrl+b`, `d` 分離，然後 `exit` 退出容器。
 
----
+啟動 TensorBoard 來監控
+在終端機中執行：
 
-這個流程的核心改動在於**第 2 步**，確保了容器的獨立運行。其他在容器內部的操作步驟與您原本的習慣幾乎完全一致。遵循這個流程，可以最大程度避免因斷開連線導致容器停止的問題，讓您的訓練持續進行（只要訓練本身不報錯且資源充足）。
+tensorboard --logdir=/home/russell512/my_deeprl_network_ori_test_0424_v0_Ablation_dp_decay/real_a1/
+
+tensorboard --logdir=/home/russell512/tensorboard_all_logs --port=6006
+
+
+
+然後在瀏覽器中打開：http://localhost:6006
