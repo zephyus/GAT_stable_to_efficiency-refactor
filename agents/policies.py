@@ -398,13 +398,16 @@ class NCMultiAgentPolicy(nn.Module):
         self.fc_m_layers  = nn.ModuleList()
         self.actor_heads  = nn.ModuleList()
         self.critic_heads = nn.ModuleList()
-        # one LSTM per agent (even if identical)
+        # one recurrent cell per agent (even if identical)
+        from agents.transformer_cells import GTrXLCell
         self.lstm_layers = nn.ModuleList([
-            nn.LSTM(3 * self.n_fc, self.n_h, 1)
+            GTrXLCell(
+                3 * self.n_fc,
+                self.n_h,
+                n_head=self.model_config.get("n_head", 4),
+            )
             for _ in range(self.n_agent)
         ])
-        for lstm in self.lstm_layers:
-            init_layer(lstm, "lstm")
 
         # cache per-agent dims
         self.n_n_ls, self.ns_ls_ls, self.na_ls_ls = [], [], []
@@ -598,9 +601,9 @@ class NCMultiAgentPolicy(nn.Module):
         fps_T_N_Dfp : (T,N,Dfp)
         """
         T, N, _ = obs_T_N_D.shape
-        h0, c0 = torch.chunk(states_N_2H, 2, dim=1)  # (N,H)
+        h0, _ = torch.chunk(states_N_2H, 2, dim=1)  # (N,H)
         dones_T_N = dones_T_N.float()
-        h = h0.clone(); c = c0.clone()
+        h = h0.clone(); c = torch.zeros_like(h0)
 
         if self.identical:
             outs = []
@@ -609,24 +612,23 @@ class NCMultiAgentPolicy(nn.Module):
                 s_flat_t = self._compute_s_features_flat_step(obs_T_N_D[t], fp_t, h)
                 s_after = self._apply_gat(s_flat_t)
 
-                out_list, h_list, c_list = [], [], []
+                out_list, h_list = [], []
                 for i in range(N):
                     m = 1.0 - dones_T_N[t, i].float()
                     h_i = h[i:i+1] * m
-                    c_i = c[i:i+1] * m
-                    out_i, (h_i, c_i) = self.lstm_layers[i](
-                        s_after[i:i+1].view(1, 1, -1),
-                        (h_i.unsqueeze(0), c_i.unsqueeze(0))
+                    h_i, _ = self.lstm_layers[i](
+                        s_after[i:i+1],
+                        h_i
                     )
-                    out_list.append(out_i.squeeze())
-                    h_list.append(h_i.squeeze(0))
-                    c_list.append(c_i.squeeze(0))
+                    out_list.append(h_i)
+                    h_list.append(h_i)
                 h = torch.cat(h_list, dim=0)
-                c = torch.cat(c_list, dim=0)
-                outs.append(torch.stack(out_list, dim=0))
+                c = torch.zeros_like(h)
+                outs.append(torch.cat(out_list, dim=0))
 
             lstm_out = torch.stack(outs, dim=1)  # (N,T,H)
-            new_state = torch.cat([h, c], dim=1)
+            zero_c = torch.zeros_like(h)
+            new_state = torch.cat([h, zero_c], dim=1)
 
         else:
             outs = []
@@ -635,24 +637,23 @@ class NCMultiAgentPolicy(nn.Module):
                 s_t = self._compute_s_features_flat_step(obs_T_N_D[t], fp_t, h)
                 s_t = self._apply_gat(s_t)
 
-                out_list, h_list, c_list = [], [], []
+                out_list, h_list = [], []
                 for i in range(N):
                     m = 1.0 - dones_T_N[t, i].float()
                     h_i = h[i:i+1] * m
-                    c_i = c[i:i+1] * m
-                    out_i, (h_i, c_i) = self.lstm_layers[i](
-                        s_t[i:i+1].view(1, 1, -1),
-                        (h_i.unsqueeze(0), c_i.unsqueeze(0))
+                    h_i, _ = self.lstm_layers[i](
+                        s_t[i:i+1],
+                        h_i
                     )
-                    out_list.append(out_i.squeeze())
-                    h_list.append(h_i.squeeze(0))
-                    c_list.append(c_i.squeeze(0))
+                    out_list.append(h_i)
+                    h_list.append(h_i)
                 h = torch.cat(h_list, dim=0)
-                c = torch.cat(c_list, dim=0)
-                outs.append(torch.stack(out_list, dim=0))
+                c = torch.zeros_like(h)
+                outs.append(torch.cat(out_list, dim=0))
 
             lstm_out = torch.stack(outs, dim=1)
-            new_state = torch.cat([h, c], dim=1)
+            zero_c = torch.zeros_like(h)
+            new_state = torch.cat([h, zero_c], dim=1)
 
         return lstm_out, new_state
 
