@@ -601,9 +601,9 @@ class NCMultiAgentPolicy(nn.Module):
         fps_T_N_Dfp : (T,N,Dfp)
         """
         T, N, _ = obs_T_N_D.shape
-        h0, c0 = torch.chunk(states_N_2H, 2, dim=1)  # (N,H)
+        h0, _ = torch.chunk(states_N_2H, 2, dim=1)  # (N,H)
         dones_T_N = dones_T_N.float()
-        h = h0.clone(); c = c0.clone()
+        h = h0.clone(); c = torch.zeros_like(h0)
 
         if self.identical:
             outs = []
@@ -620,11 +620,11 @@ class NCMultiAgentPolicy(nn.Module):
                         s_after[i:i+1],
                         h_i
                     )
-                    out_list.append(h_i.squeeze(0))
+                    out_list.append(h_i)
                     h_list.append(h_i)
                 h = torch.cat(h_list, dim=0)
                 c = torch.zeros_like(h)
-                outs.append(torch.stack(out_list, dim=0))
+                outs.append(torch.cat(out_list, dim=0))
 
             lstm_out = torch.stack(outs, dim=1)  # (N,T,H)
             zero_c = torch.zeros_like(h)
@@ -645,11 +645,11 @@ class NCMultiAgentPolicy(nn.Module):
                         s_t[i:i+1],
                         h_i
                     )
-                    out_list.append(h_i.squeeze(0))
+                    out_list.append(h_i)
                     h_list.append(h_i)
                 h = torch.cat(h_list, dim=0)
                 c = torch.zeros_like(h)
-                outs.append(torch.stack(out_list, dim=0))
+                outs.append(torch.cat(out_list, dim=0))
 
             lstm_out = torch.stack(outs, dim=1)
             zero_c = torch.zeros_like(h)
