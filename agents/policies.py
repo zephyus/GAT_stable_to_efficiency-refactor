@@ -503,7 +503,7 @@ class NCMultiAgentPolicy(nn.Module):
         s_cat = []
         for i in range(N):
             n_n = self.n_n_ls[i]
-            idx_n = self.neighbor_index_ls[i].to(device)
+            idx_n = self.neighbor_index_ls[i]
             if n_n:
                 m_i = h_N_H[idx_n].reshape(1, n_n * H)
             else:
@@ -538,7 +538,7 @@ class NCMultiAgentPolicy(nn.Module):
             s_x = F.relu(self._get_fc_x(i, n_n, fc_x_in.size(1))(fc_x_in))
             if n_n and self.fc_p_layers[i] is not None:
                 if fps_dim == 0:
-                    p_i = torch.zeros(1, self.fc_p_layers[i].in_features, device=device)
+                    p_i = x_N_Do.new_zeros(1, self.fc_p_layers[i].in_features)
                 s_p = F.relu(self.fc_p_layers[i](p_i))
             else:
                 s_p = torch.zeros(1, n_fc, device=device)
@@ -578,7 +578,7 @@ class NCMultiAgentPolicy(nn.Module):
             s_t = s_in[start_idx:end_idx]  # (N, D)
             
             # Use the base adjacency matrix (N, N) instead of batched (T*N, T*N)
-            adj_t = self.adj.to(s_in.device)  # (N, N)
+            adj_t = self.adj  # (N, N)
             
             # Apply GAT for this timestep
             out_t, att_t = self.gat_layer(s_t, adj_t)
@@ -607,7 +607,7 @@ class NCMultiAgentPolicy(nn.Module):
         obs_T_N_D : (T,N,Do)  - already float + on device
         dones_T_N : (T,N)     - float 0/1
         fps_T_N_Dfp : (T,N,Dfp)
-        mem_list : list of (mem_len, d_model) tensors for each agent
+        mem_list : list of (mem_len, 1, d_model) tensors for each agent
         """
         T, N, _ = obs_T_N_D.shape
         dones_T_N = dones_T_N.float()
@@ -618,7 +618,6 @@ class NCMultiAgentPolicy(nn.Module):
 
         if self.identical:
             outs = []
-            new_mem_list = []
             
             for t in range(T):
                 fp_t = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
@@ -632,7 +631,7 @@ class NCMultiAgentPolicy(nn.Module):
                     # Episode reset: 如果 done=1，清空記憶
                     mem_i = mem_list[i]  # (mem_len, 1, d_model)
                     if dones_T_N[t, i] > 0.5:
-                        mem_i = mem_i.detach().zero_()
+                        mem_i.mul_(0)
                     
                     # GTrXL forward: out, new_mem = cell(x, mem)
                     h_i, mem_i = self.lstm_layers[i](
@@ -648,14 +647,11 @@ class NCMultiAgentPolicy(nn.Module):
                 
                 # --- 修復 B1: 每步後立即更新記憶 ---
                 mem_list = current_new_mems
-                if t == T - 1:
-                    new_mem_list = current_new_mems
 
             lstm_out = torch.stack(outs, dim=1)  # (N,T,H)
             
         else:
             outs = []
-            new_mem_list = []
             
             for t in range(T):
                 fp_t = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
@@ -669,7 +665,7 @@ class NCMultiAgentPolicy(nn.Module):
                     # Episode reset: 如果 done=1，清空記憶
                     mem_i = mem_list[i]  # (mem_len, 1, d_model)
                     if dones_T_N[t, i] > 0.5:
-                        mem_i = mem_i.detach().zero_()
+                        mem_i.mul_(0)
                     
                     # GTrXL forward: out, new_mem = cell(x, mem)
                     h_i, mem_i = self.lstm_layers[i](
@@ -685,8 +681,6 @@ class NCMultiAgentPolicy(nn.Module):
                 
                 # --- 修復 B1: 每步後立即更新記憶 ---
                 mem_list = current_new_mems
-                if t == T - 1:
-                    new_mem_list = current_new_mems
 
             lstm_out = torch.stack(outs, dim=1)  # (N,T,H)
 

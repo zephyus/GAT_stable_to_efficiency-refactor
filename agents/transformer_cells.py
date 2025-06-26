@@ -4,8 +4,9 @@ import torch.nn.functional as F
 from typing import Tuple
 
 class GTrXLCell(nn.Module):
-    """Drop-in replacement for nn.LSTMCell.
-    forward(x_t, h_prev) -> (h_new, h_new)
+    """Transformer-style cell with memory.
+
+    forward(x_t, mem_prev) -> (h_t, mem_next)
     """
     def __init__(self, d_input, d_model, n_head=4, mem_len=16, dropout=0.1, bias=True):
         super().__init__()
@@ -27,9 +28,9 @@ class GTrXLCell(nn.Module):
             nn.Linear(4 * d_model, d_model, bias=bias),
         )
         # Gating parameters (Parisotto 2019)
-        # Initialize so sigmoid(gate_a)≈0 and sigmoid(gate_b)≈1
-        self.gate_a = nn.Parameter(torch.full((d_model,), -10.0))
-        self.gate_b = nn.Parameter(torch.full((d_model,), 10.0))
+        # Initialize gating so sigmoid(gate_a)≈0.5 and sigmoid(gate_b)≈0.88
+        self.gate_a = nn.Parameter(torch.zeros(d_model))
+        self.gate_b = nn.Parameter(torch.full((d_model,), 2.0))
         self.ln1 = nn.LayerNorm(d_model)
         self.ln2 = nn.LayerNorm(d_model)
 
@@ -50,8 +51,7 @@ class GTrXLCell(nn.Module):
         x_proj = self.proj(x_t).unsqueeze(0)  # (1, B, d_model)
         
         # Concatenate memory with current input
-        mem_cat = torch.cat([mem_prev.clone(), x_proj], dim=0)
-        seq = mem_cat  # (mem_len+1, B, d_model)
+        seq = torch.cat([mem_prev, x_proj], dim=0)  # (mem_len+1, B, d_model)
         
         # Self-attention over full sequence (mem + current)
         # MultiheadAttention expects (S, N, E) when batch_first=False
@@ -77,6 +77,6 @@ class GTrXLCell(nn.Module):
         out = h_hat + ff_out
         
         # Update memory: keep most recent mem_len timesteps
-        mem_next = mem_cat[-self.mem_len:]  # (mem_len, B, d_model)
+        mem_next = seq[-self.mem_len:]  # (mem_len, B, d_model)
         
         return out, mem_next
