@@ -59,11 +59,13 @@ class GTrXLCell(nn.Module):
         # Self-attention over full sequence (mem + current)
         # MultiheadAttention expects (S, N, E) when batch_first=False
         seq_ln = self.ln1(seq)  # (mem_len+1, B, d_model)
-        if torch.isnan(seq_ln).any():
-            raise RuntimeError("NaN DETECTED: Input to Attention block is NaN.")
+        if torch.isnan(seq_ln).any() or torch.isinf(seq_ln).any():
+            raise RuntimeError(
+                "NaN/Inf DETECTED: Input to Attention block is invalid.")
         ctx, _ = self.attn(seq_ln, seq_ln, seq_ln, need_weights=False)  # (mem_len+1, B, d_model)
-        if torch.isnan(ctx).any():
-            raise RuntimeError("NaN DETECTED: Output of Attention block is NaN.")
+        if torch.isnan(ctx).any() or torch.isinf(ctx).any():
+            raise RuntimeError(
+                "NaN/Inf DETECTED: Output of Attention block is invalid.")
         
         # Take the last timestep as current context
         ctx_t = ctx[-1]  # (B, d_model)
