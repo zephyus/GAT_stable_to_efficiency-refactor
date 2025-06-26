@@ -1,21 +1,30 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Tuple
 
 class GTrXLCell(nn.Module):
     """Drop-in replacement for nn.LSTMCell.
     forward(x_t, h_prev) -> (h_new, h_new)
     """
-    def __init__(self, d_in, d_model, n_head=4, dropout=0.1):
+    def __init__(self, d_input, d_model, n_head=4, mem_len=16, dropout=0.1, bias=True):
         super().__init__()
-        self.proj = nn.Linear(d_in, d_model)
+        # Store parameters for future use
+        self.d_input = d_input
+        self.d_model = d_model
+        self.n_head = n_head
+        self.mem_len = mem_len
+        self.dropout = dropout
+        self.bias = bias
+        
+        self.proj = nn.Linear(d_input, d_model, bias=bias)
         self.attn = nn.MultiheadAttention(
-            d_model, n_head, batch_first=True, dropout=dropout
+            d_model, n_head, batch_first=False, dropout=dropout, bias=bias
         )
         self.ffn = nn.Sequential(
-            nn.Linear(d_model, 4 * d_model),
+            nn.Linear(d_model, 4 * d_model, bias=bias),
             nn.GELU(),
-            nn.Linear(4 * d_model, d_model),
+            nn.Linear(4 * d_model, d_model, bias=bias),
         )
         # Gating parameters (Parisotto 2019)
         self.gate_a = nn.Parameter(torch.zeros(d_model))
@@ -23,19 +32,48 @@ class GTrXLCell(nn.Module):
         self.ln1 = nn.LayerNorm(d_model)
         self.ln2 = nn.LayerNorm(d_model)
 
-    def forward(self, x_t, h_prev):
-        """Single-step forward.
+    def forward(self, x_t, mem_prev):
+        """GTrXL forward with memory tensor.
 
         Args:
-            x_t (Tensor): (B, d_in)
-            h_prev (Tensor): (B, d_model)
+            x_t (Tensor): (B, d_input) - current input
+            mem_prev (Tensor): (mem_len, B, d_model) - previous memory
+
+        Returns:
+            out (Tensor): (B, d_model) - current output  
+            mem_next (Tensor): (mem_len, B, d_model) - updated memory
         """
-        x = self.proj(x_t).unsqueeze(1)  # (B,1,d_model)
-        q = k = v = self.ln1(x)
-        ctx, _ = self.attn(q, k, v, need_weights=False)
-        # Gated residual connection
-        h_hat = torch.sigmoid(self.gate_a) * h_prev.unsqueeze(1) + \
-                torch.sigmoid(self.gate_b) * ctx
+        B = x_t.size(0)
+        
+        # Project input and add batch dim at sequence position
+        x_proj = self.proj(x_t).unsqueeze(0)  # (1, B, d_model)
+        
+        # Concatenate memory with current input
+        seq = torch.cat([mem_prev, x_proj], dim=0)  # (mem_len+1, B, d_model)
+        
+        # Self-attention over full sequence (mem + current)
+        # MultiheadAttention expects (S, N, E) when batch_first=False
+        seq_ln = self.ln1(seq)  # (mem_len+1, B, d_model)
+        ctx, _ = self.attn(seq_ln, seq_ln, seq_ln, need_weights=False)  # (mem_len+1, B, d_model)
+        
+        # Take the last timestep as current context
+        ctx_t = ctx[-1]  # (B, d_model)
+        
+        # Apply dropout
+        ctx_t = F.dropout(ctx_t, p=self.dropout, training=self.training)
+        
+        # Gated residual connection (Parisotto 2019 style)
+        # Use stronger gating: gate_a=-10 (almost 0), gate_b=+10 (almost 1)
+        gate_a_val = torch.sigmoid(self.gate_a - 10.0)  # ~0, forget old
+        gate_b_val = torch.sigmoid(self.gate_b + 10.0)  # ~1, keep new
+        
+        prev_h = mem_prev[-1]  # (B, d_model) - last memory state
+        h_hat = gate_a_val * prev_h + gate_b_val * ctx_t
+        
+        # Feed-forward and residual
         out = h_hat + self.ffn(self.ln2(h_hat))
-        h_new = out.squeeze(1)
-        return h_new, h_new  # second tensor kept for compatibility
+        
+        # Update memory: keep most recent mem_len timesteps
+        mem_next = seq[-self.mem_len:]  # (mem_len, B, d_model)
+        
+        return out, mem_next

@@ -101,7 +101,7 @@ class LstmPolicy(Policy):
         dones = dones.cuda()
         xs = self._encode_ob(obs)
         hs, new_states = run_rnn(self.lstm_layer, xs, dones, self.states_bw)
-        self.states_bw = new_states.detach()
+        self.states_bw = [m.detach() for m in new_states]
         actor_dist = torch.distributions.categorical.Categorical(logits=F.log_softmax(self.actor_head(hs), dim=1))
         vs = self._run_critic_head(hs, nactions)
         self.policy_loss, self.value_loss, self.entropy_loss = \
@@ -120,7 +120,7 @@ class LstmPolicy(Policy):
         x = self._encode_ob(ob)
         h, new_states = run_rnn(self.lstm_layer, x, done, self.states_fw)
         if out_type.startswith('p'):
-            self.states_fw = new_states.detach()
+            self.states_fw = [m.detach() for m in new_states]
             logits = self.actor_head(h)
             prob = F.softmax(logits, dim=1)
             prob_1d = prob.squeeze().cpu().detach().numpy()
@@ -234,7 +234,6 @@ class NCMultiAgentPolicy(nn.Module):
         self.to(self.dev)         # …then move
 
         # ---------- runtime state ----------
-        self.register_buffer("zero_pad", torch.zeros(1, 2 * n_fc, device=self.dev))
         self._reset()
 
         # ---------- adjacency / edge index ----------
@@ -287,9 +286,13 @@ class NCMultiAgentPolicy(nn.Module):
         return x
 
     def _reset(self):
-        """Reset forward/backward hidden states."""
-        self.states_fw = torch.zeros(self.n_agent, 2 * self.n_h, device=self.dev)
-        self.states_bw = torch.zeros_like(self.states_fw)
+        """Reset forward/backward GTrXL memory states."""
+        mem_len = self.model_config.get("mem_len", 16)  # 記憶長度，依需求調整
+        # list 長度 = n_agent，每個元素 shape = (mem_len, 1, d_model)
+        # Batch 維固定為 1，如需並行 rollout 再擴張
+        self.states_fw = [torch.zeros(mem_len, 1, self.n_h, device=self.dev)
+                          for _ in range(self.n_agent)]
+        self.states_bw = [torch.zeros_like(m) for m in self.states_fw]
 
     @torch.no_grad()
     def forward(self, ob_N_Do, done_N, fp_N_Dfp, action=None, out_type="p"):
@@ -325,21 +328,21 @@ class NCMultiAgentPolicy(nn.Module):
                  e_coef, v_coef, summary_writer=None, global_step=None):
         """Training backward pass for computing losses and gradients."""
         # Convert inputs to tensors and move to device
-        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
+        obs = torch.from_numpy(obs).float().to(self.dev)  # 保持 (T,N,D) 不轉置
         dones_np = np.asarray(dones)
         if dones_np.ndim == 1:
             dones_T_N = torch.from_numpy(dones_np).float().unsqueeze(-1).expand(-1, self.n_agent).to(self.dev)
         else:
             dones_T_N = torch.from_numpy(dones_np).float().to(self.dev)
-        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
-        acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
+        fps = torch.from_numpy(fps).float().to(self.dev)  # 保持 (T,N,D) 不轉置
+        acts = torch.from_numpy(acts).long().to(self.dev)  # 移除 transpose(0, 1)
 
         # Forward pass through communication layers
         T, N = obs.size(0), self.n_agent
         dones_T_N = self._ensure_TN(dones_T_N, T, N, "dones")
         
         hs_N_T_H, new_states = self._run_comm_layers(obs, dones_T_N, fps, self.states_bw)
-        self.states_bw = new_states.detach()
+        self.states_bw = new_states  # new_states 已在 cell 內 detach，無需額外處理
         
         # Get actor outputs (log probabilities)
         ps = self._run_actor_heads(hs_N_T_H)
@@ -353,8 +356,8 @@ class NCMultiAgentPolicy(nn.Module):
         self.entropy_loss = 0
         
         # Convert advantage and reward tensors
-        Rs = torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev)
-        Advs = torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev)
+        Rs = torch.from_numpy(Rs).float().to(self.dev)  # 移除 transpose(0, 1)
+        Advs = torch.from_numpy(Advs).float().to(self.dev)  # 移除 transpose(0, 1)
         
         # Compute losses for each agent
         for i in range(self.n_agent):
@@ -402,9 +405,12 @@ class NCMultiAgentPolicy(nn.Module):
         from agents.transformer_cells import GTrXLCell
         self.lstm_layers = nn.ModuleList([
             GTrXLCell(
-                3 * self.n_fc,
-                self.n_h,
+                3 * self.n_fc,  # d_input
+                self.n_h,       # d_model  
                 n_head=self.model_config.get("n_head", 4),
+                mem_len=self.model_config.get("mem_len", 16),
+                dropout=self.model_config.get("dropout", 0.1),
+                bias=self.model_config.get("bias", True),
             )
             for _ in range(self.n_agent)
         ])
@@ -467,6 +473,7 @@ class NCMultiAgentPolicy(nn.Module):
         key = f"{aid}_{n_n}_{in_dim}"
         with self._fc_x_lock:
             if key not in self.fc_x_layers:
+                logging.info(f"Creating fc_x layer: agent_{aid}_nn_{n_n}_in{in_dim} (in={in_dim})")
                 layer = nn.Linear(in_dim, self.n_fc); init_layer(layer, "fc")
                 self.fc_x_layers[key] = layer.to(self.dev)
         return self.fc_x_layers[key]
@@ -594,68 +601,95 @@ class NCMultiAgentPolicy(nn.Module):
     # ------------------------------------------------------------------#
     #  Core RNN + comm pipeline                                         #
     # ------------------------------------------------------------------#
-    def _run_comm_layers(self, obs_T_N_D, dones_T_N, fps_T_N_Dfp, states_N_2H):
+    def _run_comm_layers(self, obs_T_N_D, dones_T_N, fps_T_N_Dfp, mem_list):
         """
         obs_T_N_D : (T,N,Do)  - already float + on device
         dones_T_N : (T,N)     - float 0/1
         fps_T_N_Dfp : (T,N,Dfp)
+        mem_list : list of (mem_len, d_model) tensors for each agent
         """
         T, N, _ = obs_T_N_D.shape
-        h0, _ = torch.chunk(states_N_2H, 2, dim=1)  # (N,H)
         dones_T_N = dones_T_N.float()
-        h = h0.clone(); c = torch.zeros_like(h0)
+        
+        # --- 取當前隱向量：從記憶最後一個時刻提取 ---
+        # mem_list[i] shape: (mem_len, B, d_model), 取 [-1, 0] -> (d_model,)
+        h = torch.stack([mem[-1, 0] for mem in mem_list], dim=0)  # (N, H)
 
         if self.identical:
             outs = []
+            new_mem_list = []
+            
             for t in range(T):
                 fp_t = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
                 s_flat_t = self._compute_s_features_flat_step(obs_T_N_D[t], fp_t, h)
                 s_after = self._apply_gat(s_flat_t)
 
                 out_list, h_list = [], []
+                current_new_mems = []
+                
                 for i in range(N):
-                    m = 1.0 - dones_T_N[t, i].float()
-                    h_i = h[i:i+1] * m
-                    h_i, _ = self.lstm_layers[i](
-                        s_after[i:i+1],
-                        h_i
+                    # Episode reset: 如果 done=1，清空記憶
+                    mem_i = mem_list[i]  # (mem_len, 1, d_model)
+                    if dones_T_N[t, i] > 0.5:
+                        mem_i = torch.zeros_like(mem_i)
+                    
+                    # GTrXL forward: out, new_mem = cell(x, mem)
+                    h_i, mem_i = self.lstm_layers[i](
+                        s_after[i:i+1],  # x shape (1, D)
+                        mem_i            # mem shape (mem_len, 1, d_model)
                     )
                     out_list.append(h_i)
-                    h_list.append(h_i)
-                h = torch.cat(h_list, dim=0)
-                c = torch.zeros_like(h)
-                outs.append(torch.cat(out_list, dim=0))
+                    h_list.append(h_i.squeeze(0))  # (H,) for next step communication
+                    current_new_mems.append(mem_i.detach())  # 斷開舊梯度
+                
+                h = torch.stack(h_list, dim=0)  # (N, H)
+                outs.append(torch.cat(out_list, dim=0))  # (N, H)
+                
+                # --- 修復 B1: 每步後立即更新記憶 ---
+                mem_list = current_new_mems
+                if t == T - 1:
+                    new_mem_list = current_new_mems
 
             lstm_out = torch.stack(outs, dim=1)  # (N,T,H)
-            zero_c = torch.zeros_like(h)
-            new_state = torch.cat([h, zero_c], dim=1)
-
+            
         else:
             outs = []
+            new_mem_list = []
+            
             for t in range(T):
                 fp_t = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
                 s_t = self._compute_s_features_flat_step(obs_T_N_D[t], fp_t, h)
                 s_t = self._apply_gat(s_t)
 
                 out_list, h_list = [], []
+                current_new_mems = []
+                
                 for i in range(N):
-                    m = 1.0 - dones_T_N[t, i].float()
-                    h_i = h[i:i+1] * m
-                    h_i, _ = self.lstm_layers[i](
-                        s_t[i:i+1],
-                        h_i
+                    # Episode reset: 如果 done=1，清空記憶
+                    mem_i = mem_list[i]  # (mem_len, 1, d_model)
+                    if dones_T_N[t, i] > 0.5:
+                        mem_i = torch.zeros_like(mem_i)
+                    
+                    # GTrXL forward: out, new_mem = cell(x, mem)
+                    h_i, mem_i = self.lstm_layers[i](
+                        s_t[i:i+1],     # x shape (1, D)
+                        mem_i           # mem shape (mem_len, 1, d_model)
                     )
                     out_list.append(h_i)
-                    h_list.append(h_i)
-                h = torch.cat(h_list, dim=0)
-                c = torch.zeros_like(h)
-                outs.append(torch.cat(out_list, dim=0))
+                    h_list.append(h_i.squeeze(0))  # (H,) for next step communication
+                    current_new_mems.append(mem_i.detach())  # 斷開舊梯度
+                
+                h = torch.stack(h_list, dim=0)  # (N, H)
+                outs.append(torch.cat(out_list, dim=0))  # (N, H)
+                
+                # --- 修復 B1: 每步後立即更新記憶 ---
+                mem_list = current_new_mems
+                if t == T - 1:
+                    new_mem_list = current_new_mems
 
-            lstm_out = torch.stack(outs, dim=1)
-            zero_c = torch.zeros_like(h)
-            new_state = torch.cat([h, zero_c], dim=1)
+            lstm_out = torch.stack(outs, dim=1)  # (N,T,H)
 
-        return lstm_out, new_state
+        return lstm_out, new_mem_list
 
 
 
@@ -725,16 +759,16 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
 
     def backward(self, obs, fps, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
+        obs = torch.from_numpy(obs).float().to(self.dev)  # 保持 (T,N,D) 不轉置
         dones_T_N = torch.from_numpy(dones).float().to(self.dev)
-        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
-        acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
+        fps = torch.from_numpy(fps).float().to(self.dev)  # 保持 (T,N,D) 不轉置
+        acts = torch.from_numpy(acts).long().to(self.dev)  # 移除 transpose(0, 1)
 
         T, N = obs.size(0), self.n_agent
         dones_T_N = self._ensure_TN(dones_T_N, T, N, "dones")
 
         hs, new_states = self._run_comm_layers(obs, dones_T_N, fps, self.states_bw)
-        self.states_bw = new_states.detach()
+        self.states_bw = new_states  # 已在 cell 內處理 detach
         ps = self._run_actor_heads(hs)
         bps = self._run_actor_heads(hs, acts)
         for i in range(self.n_agent):
@@ -745,8 +779,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         self.policy_loss = 0
         self.value_loss = 0
         self.entropy_loss = 0
-        Rs = torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev)
-        Advs = torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev)
+        Rs = torch.from_numpy(Rs).float().to(self.dev)  # 移除 transpose(0, 1)
+        Advs = torch.from_numpy(Advs).float().to(self.dev)  # 移除 transpose(0, 1)
         for i in range(self.n_agent):
             actor_dist_i = torch.distributions.categorical.Categorical(logits=ps[i])
             policy_loss_i, value_loss_i, entropy_loss_i = \
@@ -766,7 +800,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
         h, new_states = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
-            self.states_fw = new_states.detach()
+            self.states_fw = new_states  # 已在 cell 內處理 detach
             if (np.array(action) != None).all():
                 action = torch.from_numpy(np.expand_dims(action, axis=1)).long()
             return self._run_actor_heads(h, action, detach=True)
@@ -786,7 +820,17 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         else:
             self.fc_m_layers.append(None)
             self.fc_p_layers.append(None)
-        lstm_layer = nn.LSTMCell(n_lstm_in, self.n_h)
+        
+        # 使用 GTrXLCell 代替 LSTMCell
+        from agents.transformer_cells import GTrXLCell
+        lstm_layer = GTrXLCell(
+            d_input=n_lstm_in,
+            d_model=self.n_h,
+            n_head=4,          # 建議超參數
+            mem_len=16,        # 建議超參數
+            dropout=0.1,       # 建議超參數
+            bias=True          # 建議超參數
+        )
         init_layer(lstm_layer, 'lstm')
         self.lstm_layers.append(lstm_layer)
 
@@ -963,14 +1007,17 @@ class ConsensusPolicy(NCMultiAgentPolicy):
         return wts
 
     def _run_comm_layers(self, obs, dones, fps, states):
-        obs = obs.transpose(0, 1)
+        # obs 已經是 (T,N,D) 格式，不需要轉置
+        # 這個方法看起來不完整，ConsensusPolicy 可能未被實際使用
         hs = []
         new_states = []
         for i in range(self.n_agent):
-            xs_i = F.relu(self.fc_x_layers[f'agent_{i}_nn_0'](obs[i]))
-            hs.append(hs_i.unsqueeze(0))
-            new_states.append(new_states_i.unsqueeze(0))
-        return torch.cat(hs), torch.cat(new_states)
+            xs_i = F.relu(self.fc_x_layers[f'agent_{i}_nn_0'](obs[:, i]))  # 修正索引
+            # 注意：hs_i 和 new_states_i 未定義，這個方法可能不完整
+            # hs.append(hs_i.unsqueeze(0))
+            # new_states.append(new_states_i.unsqueeze(0))
+        # return torch.cat(hs), torch.cat(new_states)
+        raise NotImplementedError("ConsensusPolicy._run_comm_layers is incomplete")
 
 
 class DIALMultiAgentPolicy(NCMultiAgentPolicy):
