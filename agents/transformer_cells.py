@@ -27,8 +27,9 @@ class GTrXLCell(nn.Module):
             nn.Linear(4 * d_model, d_model, bias=bias),
         )
         # Gating parameters (Parisotto 2019)
-        self.gate_a = nn.Parameter(torch.zeros(d_model))
-        self.gate_b = nn.Parameter(torch.ones(d_model))
+        # Initialize so sigmoid(gate_a)≈0 and sigmoid(gate_b)≈1
+        self.gate_a = nn.Parameter(torch.full((d_model,), -10.0))
+        self.gate_b = nn.Parameter(torch.full((d_model,), 10.0))
         self.ln1 = nn.LayerNorm(d_model)
         self.ln2 = nn.LayerNorm(d_model)
 
@@ -63,9 +64,8 @@ class GTrXLCell(nn.Module):
         ctx_t = F.dropout(ctx_t, p=self.dropout, training=self.training)
         
         # Gated residual connection (Parisotto 2019 style)
-        # Use stronger gating: gate_a=-10 (almost 0), gate_b=+10 (almost 1)
-        gate_a_val = torch.sigmoid(self.gate_a - 10.0)  # ~0, forget old
-        gate_b_val = torch.sigmoid(self.gate_b + 10.0)  # ~1, keep new
+        gate_a_val = torch.sigmoid(self.gate_a)
+        gate_b_val = torch.sigmoid(self.gate_b)
         
         prev_h = mem_prev[-1]  # (B, d_model) - last memory state
         h_hat = gate_a_val * prev_h + gate_b_val * ctx_t

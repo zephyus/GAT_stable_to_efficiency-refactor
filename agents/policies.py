@@ -304,7 +304,8 @@ class NCMultiAgentPolicy(nn.Module):
         T, N = ob.size(0), self.n_agent
         done = self._ensure_TN(done, T, N, "done")
 
-        hs_N_T_H, self.states_fw = self._run_comm_layers(ob, done, fp, self.states_fw)
+        hs_N_T_H, mem_list = self._run_comm_layers(ob, done, fp, self.states_fw)
+        self.states_fw = [m.detach() for m in mem_list]
 
         if out_type.startswith("p"):
             # 只取最後一個 time-step，保證回傳 1-D 機率向量
@@ -341,8 +342,8 @@ class NCMultiAgentPolicy(nn.Module):
         T, N = obs.size(0), self.n_agent
         dones_T_N = self._ensure_TN(dones_T_N, T, N, "dones")
         
-        hs_N_T_H, new_states = self._run_comm_layers(obs, dones_T_N, fps, self.states_bw)
-        self.states_bw = new_states  # new_states 已在 cell 內 detach，無需額外處理
+        hs_N_T_H, mem_list = self._run_comm_layers(obs, dones_T_N, fps, self.states_bw)
+        self.states_bw = [m.detach() for m in mem_list]
         
         # Get actor outputs (log probabilities)
         ps = self._run_actor_heads(hs_N_T_H)
@@ -610,6 +611,7 @@ class NCMultiAgentPolicy(nn.Module):
         """
         T, N, _ = obs_T_N_D.shape
         dones_T_N = dones_T_N.float()
+        assert all(m.requires_grad for m in mem_list), "memory grad truncated!"
         
         # --- 取當前隱向量：從記憶最後一個時刻提取 ---
         # mem_list[i] shape: (mem_len, B, d_model), 取 [-1, 0] -> (d_model,)
@@ -640,7 +642,7 @@ class NCMultiAgentPolicy(nn.Module):
                     )
                     out_list.append(h_i)
                     h_list.append(h_i.squeeze(0))  # (H,) for next step communication
-                    current_new_mems.append(mem_i.detach())  # 斷開舊梯度
+                    current_new_mems.append(mem_i)
                 
                 h = torch.stack(h_list, dim=0)  # (N, H)
                 outs.append(torch.cat(out_list, dim=0))  # (N, H)
@@ -677,7 +679,7 @@ class NCMultiAgentPolicy(nn.Module):
                     )
                     out_list.append(h_i)
                     h_list.append(h_i.squeeze(0))  # (H,) for next step communication
-                    current_new_mems.append(mem_i.detach())  # 斷開舊梯度
+                    current_new_mems.append(mem_i)
                 
                 h = torch.stack(h_list, dim=0)  # (N, H)
                 outs.append(torch.cat(out_list, dim=0))  # (N, H)
@@ -689,7 +691,7 @@ class NCMultiAgentPolicy(nn.Module):
 
             lstm_out = torch.stack(outs, dim=1)  # (N,T,H)
 
-        return lstm_out, new_mem_list
+        return lstm_out, mem_list
 
 
 
@@ -767,8 +769,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         T, N = obs.size(0), self.n_agent
         dones_T_N = self._ensure_TN(dones_T_N, T, N, "dones")
 
-        hs, new_states = self._run_comm_layers(obs, dones_T_N, fps, self.states_bw)
-        self.states_bw = new_states  # 已在 cell 內處理 detach
+        hs, mem_list = self._run_comm_layers(obs, dones_T_N, fps, self.states_bw)
+        self.states_bw = [m.detach() for m in mem_list]
         ps = self._run_actor_heads(hs)
         bps = self._run_actor_heads(hs, acts)
         for i in range(self.n_agent):
@@ -798,9 +800,9 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float()
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float()
         fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
-        h, new_states = self._run_comm_layers(ob, done, fp, self.states_fw)
+        h, mem_list = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
-            self.states_fw = new_states  # 已在 cell 內處理 detach
+            self.states_fw = [m.detach() for m in mem_list]
             if (np.array(action) != None).all():
                 action = torch.from_numpy(np.expand_dims(action, axis=1)).long()
             return self._run_actor_heads(h, action, detach=True)
