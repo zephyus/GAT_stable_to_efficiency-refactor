@@ -304,7 +304,8 @@ class NCMultiAgentPolicy(nn.Module):
         T, N = ob.size(0), self.n_agent
         done = self._ensure_TN(done, T, N, "done")
 
-        hs_N_T_H, self.states_fw = self._run_comm_layers(ob, done, fp, self.states_fw)
+        hs_N_T_H, mem_list = self._run_comm_layers(ob, done, fp, self.states_fw)
+        self.states_fw = [m.detach() for m in mem_list]
 
         if out_type.startswith("p"):
             # 只取最後一個 time-step，保證回傳 1-D 機率向量
@@ -341,8 +342,8 @@ class NCMultiAgentPolicy(nn.Module):
         T, N = obs.size(0), self.n_agent
         dones_T_N = self._ensure_TN(dones_T_N, T, N, "dones")
         
-        hs_N_T_H, new_states = self._run_comm_layers(obs, dones_T_N, fps, self.states_bw)
-        self.states_bw = new_states  # new_states 已在 cell 內 detach，無需額外處理
+        hs_N_T_H, mem_list = self._run_comm_layers(obs, dones_T_N, fps, self.states_bw)
+        self.states_bw = [m.detach() for m in mem_list]
         
         # Get actor outputs (log probabilities)
         ps = self._run_actor_heads(hs_N_T_H)
@@ -502,7 +503,7 @@ class NCMultiAgentPolicy(nn.Module):
         s_cat = []
         for i in range(N):
             n_n = self.n_n_ls[i]
-            idx_n = self.neighbor_index_ls[i].to(device)
+            idx_n = self.neighbor_index_ls[i]
             if n_n:
                 m_i = h_N_H[idx_n].reshape(1, n_n * H)
             else:
@@ -537,7 +538,7 @@ class NCMultiAgentPolicy(nn.Module):
             s_x = F.relu(self._get_fc_x(i, n_n, fc_x_in.size(1))(fc_x_in))
             if n_n and self.fc_p_layers[i] is not None:
                 if fps_dim == 0:
-                    p_i = torch.zeros(1, self.fc_p_layers[i].in_features, device=device)
+                    p_i = x_N_Do.new_zeros(1, self.fc_p_layers[i].in_features)
                 s_p = F.relu(self.fc_p_layers[i](p_i))
             else:
                 s_p = torch.zeros(1, n_fc, device=device)
@@ -577,7 +578,7 @@ class NCMultiAgentPolicy(nn.Module):
             s_t = s_in[start_idx:end_idx]  # (N, D)
             
             # Use the base adjacency matrix (N, N) instead of batched (T*N, T*N)
-            adj_t = self.adj.to(s_in.device)  # (N, N)
+            adj_t = self.adj  # (N, N)
             
             # Apply GAT for this timestep
             out_t, att_t = self.gat_layer(s_t, adj_t)
@@ -606,7 +607,7 @@ class NCMultiAgentPolicy(nn.Module):
         obs_T_N_D : (T,N,Do)  - already float + on device
         dones_T_N : (T,N)     - float 0/1
         fps_T_N_Dfp : (T,N,Dfp)
-        mem_list : list of (mem_len, d_model) tensors for each agent
+        mem_list : list of (mem_len, 1, d_model) tensors for each agent
         """
         T, N, _ = obs_T_N_D.shape
         dones_T_N = dones_T_N.float()
@@ -617,7 +618,6 @@ class NCMultiAgentPolicy(nn.Module):
 
         if self.identical:
             outs = []
-            new_mem_list = []
             
             for t in range(T):
                 fp_t = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
@@ -631,7 +631,7 @@ class NCMultiAgentPolicy(nn.Module):
                     # Episode reset: 如果 done=1，清空記憶
                     mem_i = mem_list[i]  # (mem_len, 1, d_model)
                     if dones_T_N[t, i] > 0.5:
-                        mem_i = torch.zeros_like(mem_i)
+                        mem_i.mul_(0)
                     
                     # GTrXL forward: out, new_mem = cell(x, mem)
                     h_i, mem_i = self.lstm_layers[i](
@@ -640,21 +640,18 @@ class NCMultiAgentPolicy(nn.Module):
                     )
                     out_list.append(h_i)
                     h_list.append(h_i.squeeze(0))  # (H,) for next step communication
-                    current_new_mems.append(mem_i.detach())  # 斷開舊梯度
+                    current_new_mems.append(mem_i)
                 
                 h = torch.stack(h_list, dim=0)  # (N, H)
                 outs.append(torch.cat(out_list, dim=0))  # (N, H)
                 
                 # --- 修復 B1: 每步後立即更新記憶 ---
                 mem_list = current_new_mems
-                if t == T - 1:
-                    new_mem_list = current_new_mems
 
             lstm_out = torch.stack(outs, dim=1)  # (N,T,H)
             
         else:
             outs = []
-            new_mem_list = []
             
             for t in range(T):
                 fp_t = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
@@ -668,7 +665,7 @@ class NCMultiAgentPolicy(nn.Module):
                     # Episode reset: 如果 done=1，清空記憶
                     mem_i = mem_list[i]  # (mem_len, 1, d_model)
                     if dones_T_N[t, i] > 0.5:
-                        mem_i = torch.zeros_like(mem_i)
+                        mem_i.mul_(0)
                     
                     # GTrXL forward: out, new_mem = cell(x, mem)
                     h_i, mem_i = self.lstm_layers[i](
@@ -677,19 +674,17 @@ class NCMultiAgentPolicy(nn.Module):
                     )
                     out_list.append(h_i)
                     h_list.append(h_i.squeeze(0))  # (H,) for next step communication
-                    current_new_mems.append(mem_i.detach())  # 斷開舊梯度
+                    current_new_mems.append(mem_i)
                 
                 h = torch.stack(h_list, dim=0)  # (N, H)
                 outs.append(torch.cat(out_list, dim=0))  # (N, H)
                 
                 # --- 修復 B1: 每步後立即更新記憶 ---
                 mem_list = current_new_mems
-                if t == T - 1:
-                    new_mem_list = current_new_mems
 
             lstm_out = torch.stack(outs, dim=1)  # (N,T,H)
 
-        return lstm_out, new_mem_list
+        return lstm_out, mem_list
 
 
 
@@ -700,9 +695,9 @@ class NCMultiAgentPolicy(nn.Module):
     def _run_actor_heads(self, hs, detach=False):
         outs = []
         for i, h in enumerate(hs):
-            raw = self.actor_heads[i](h)
+            logits = self.actor_heads[i](h)
             if detach:
-                prob = F.softmax(raw, dim=1).detach().cpu().numpy()
+                prob = F.softmax(logits, dim=1).detach().cpu().numpy()
                 # Ensure each probability vector is 1-D
                 if prob.ndim > 1:
                     prob = prob.squeeze()
@@ -710,7 +705,7 @@ class NCMultiAgentPolicy(nn.Module):
                         prob = prob.flatten()
                 outs.append(prob)
             else:
-                outs.append(F.log_softmax(raw, dim=1))
+                outs.append(logits)
         return outs
 
     def _build_value_input(self, h_T_H, actions_T_N, aid):
@@ -767,8 +762,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         T, N = obs.size(0), self.n_agent
         dones_T_N = self._ensure_TN(dones_T_N, T, N, "dones")
 
-        hs, new_states = self._run_comm_layers(obs, dones_T_N, fps, self.states_bw)
-        self.states_bw = new_states  # 已在 cell 內處理 detach
+        hs, mem_list = self._run_comm_layers(obs, dones_T_N, fps, self.states_bw)
+        self.states_bw = [m.detach() for m in mem_list]
         ps = self._run_actor_heads(hs)
         bps = self._run_actor_heads(hs, acts)
         for i in range(self.n_agent):
@@ -798,9 +793,9 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float()
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float()
         fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
-        h, new_states = self._run_comm_layers(ob, done, fp, self.states_fw)
+        h, mem_list = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
-            self.states_fw = new_states  # 已在 cell 內處理 detach
+            self.states_fw = [m.detach() for m in mem_list]
             if (np.array(action) != None).all():
                 action = torch.from_numpy(np.expand_dims(action, axis=1)).long()
             return self._run_actor_heads(h, action, detach=True)
@@ -867,8 +862,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         if (np.array(preactions) == None).all():
             for i in range(self.n_agent):
                 if i not in self.groups:
+                    logits = self.actor_heads[i](hs[i])
                     if detach:
-                        logits = self.actor_heads[i](hs[i])
                         prob = F.softmax(logits, dim=1)
                         prob_1d = prob.squeeze().cpu().detach().numpy()
                         # Ensure 1-D output
@@ -876,7 +871,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                             prob_1d = prob_1d.flatten()
                         p_i = prob_1d
                     else:
-                        p_i = F.log_softmax(self.actor_heads[i](hs[i]), dim=1)
+                        p_i = logits
                     ps[i] = p_i
         else:
             for i in range(self.n_agent):
@@ -891,8 +886,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                         h_i = torch.cat([hs[i]] + na_i_ls, dim=1)
                     else:
                         h_i = hs[i]
+                    logits = self.actor_heads[i](h_i)
                     if detach:
-                        logits = self.actor_heads[i](h_i)
                         prob = F.softmax(logits, dim=1)
                         prob_1d = prob.squeeze().cpu().detach().numpy()
                         # Ensure 1-D output
@@ -900,7 +895,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                             prob_1d = prob_1d.flatten()
                         p_i = prob_1d
                     else:
-                        p_i = F.log_softmax(self.actor_heads[i](h_i), dim=1)
+                        p_i = logits
                     ps[i] = p_i
         return ps
 
