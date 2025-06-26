@@ -96,13 +96,16 @@ class LstmPolicy(Policy):
     def backward(self, obs, nactions, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
         obs = torch.from_numpy(obs).float()
+        obs = torch.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
         dones = torch.from_numpy(dones).float()
         obs = obs.cuda()
         dones = dones.cuda()
         xs = self._encode_ob(obs)
         hs, new_states = run_rnn(self.lstm_layer, xs, dones, self.states_bw)
         self.states_bw = [m.detach() for m in new_states]
-        actor_dist = torch.distributions.categorical.Categorical(logits=F.log_softmax(self.actor_head(hs), dim=1))
+        logits = self.actor_head(hs)
+        logits = torch.clamp(logits, -20.0, 20.0)
+        actor_dist = torch.distributions.categorical.Categorical(logits=F.log_softmax(logits, dim=1))
         vs = self._run_critic_head(hs, nactions)
         self.policy_loss, self.value_loss, self.entropy_loss = \
             self._run_loss(actor_dist, e_coef, v_coef, vs,
@@ -111,17 +114,22 @@ class LstmPolicy(Policy):
                            torch.from_numpy(Advs).float())
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
     def forward(self, ob, done, naction=None, out_type='p'):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().cuda()
+        ob = torch.nan_to_num(ob, nan=0.0, posinf=1e6, neginf=-1e6)
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float().cuda()
         x = self._encode_ob(ob)
         h, new_states = run_rnn(self.lstm_layer, x, done, self.states_fw)
         if out_type.startswith('p'):
             self.states_fw = [m.detach() for m in new_states]
             logits = self.actor_head(h)
+            logits = torch.clamp(logits, -20.0, 20.0)
+            if torch.isnan(logits).any():
+                raise RuntimeError("NaN in logits during forward")
             prob = F.softmax(logits, dim=1)
             prob_1d = prob.squeeze().cpu().detach().numpy()
             # Ensure 1-D output
@@ -298,8 +306,10 @@ class NCMultiAgentPolicy(nn.Module):
     def forward(self, ob_N_Do, done_N, fp_N_Dfp, action=None, out_type="p"):
         """Single-step inference (API 與舊版相容)."""
         ob   = torch.as_tensor(ob_N_Do, dtype=torch.float32, device=self.dev).unsqueeze(0)
+        ob   = torch.nan_to_num(ob, nan=0.0, posinf=1e6, neginf=-1e6)
         done = torch.as_tensor(done_N,   dtype=torch.float32, device=self.dev)
         fp   = torch.as_tensor(fp_N_Dfp, dtype=torch.float32, device=self.dev).unsqueeze(0)
+        fp   = torch.nan_to_num(fp, nan=0.0, posinf=1e6, neginf=-1e6)
 
         T, N = ob.size(0), self.n_agent
         done = self._ensure_TN(done, T, N, "done")
@@ -312,6 +322,7 @@ class NCMultiAgentPolicy(nn.Module):
             probs = []
             for i in range(self.n_agent):
                 logits = self.actor_heads[i](hs_N_T_H[i, -1:])  # [1, n_actions]
+                logits = torch.clamp(logits, -20.0, 20.0)
                 prob = F.softmax(logits, dim=-1)  # [1, n_actions]
                 prob_1d = prob.squeeze().cpu().numpy()  # ensure 1-D
                 # Extra safety: if still not 1-D, flatten it
@@ -329,13 +340,16 @@ class NCMultiAgentPolicy(nn.Module):
                  e_coef, v_coef, summary_writer=None, global_step=None):
         """Training backward pass for computing losses and gradients."""
         # Convert inputs to tensors and move to device
-        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
+        obs = torch.from_numpy(obs).float()
+        obs = torch.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
+        obs = obs.transpose(0, 1).to(self.dev)
         dones_np = np.asarray(dones)
         if dones_np.ndim == 1:
             dones_T_N = torch.from_numpy(dones_np).float().unsqueeze(-1).expand(-1, self.n_agent).to(self.dev)
         else:
             dones_T_N = torch.from_numpy(dones_np).float().transpose(0, 1).to(self.dev)
         fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        fps = torch.nan_to_num(fps, nan=0.0, posinf=1e6, neginf=-1e6)
         acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
 
         # Forward pass through communication layers
@@ -373,6 +387,7 @@ class NCMultiAgentPolicy(nn.Module):
         # Total loss and backpropagation
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
         
         # Optional tensorboard logging
         if summary_writer is not None:
@@ -696,6 +711,9 @@ class NCMultiAgentPolicy(nn.Module):
         outs = []
         for i, h in enumerate(hs):
             logits = self.actor_heads[i](h)
+            logits = torch.clamp(logits, -20.0, 20.0)
+            if torch.isnan(logits).any():
+                raise RuntimeError("NaN in logits during _run_actor_heads")
             if detach:
                 prob = F.softmax(logits, dim=1).detach().cpu().numpy()
                 # Ensure each probability vector is 1-D
@@ -754,9 +772,12 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
 
     def backward(self, obs, fps, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
+        obs = torch.from_numpy(obs).float()
+        obs = torch.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
+        obs = obs.transpose(0, 1).to(self.dev)
         dones_T_N = torch.from_numpy(dones).float().transpose(0, 1).to(self.dev)
         fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        fps = torch.nan_to_num(fps, nan=0.0, posinf=1e6, neginf=-1e6)
         acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
 
         T, N = obs.size(0), self.n_agent
@@ -786,13 +807,16 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
             self.entropy_loss += entropy_loss_i
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
     def forward(self, ob, done, fp, action=None, out_type='p'):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float()
+        ob = torch.nan_to_num(ob, nan=0.0, posinf=1e6, neginf=-1e6)
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float()
         fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
+        fp = torch.nan_to_num(fp, nan=0.0, posinf=1e6, neginf=-1e6)
         h, mem_list = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
             self.states_fw = [m.detach() for m in mem_list]
@@ -863,6 +887,9 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
             for i in range(self.n_agent):
                 if i not in self.groups:
                     logits = self.actor_heads[i](hs[i])
+                    logits = torch.clamp(logits, -20.0, 20.0)
+                    if torch.isnan(logits).any():
+                        raise RuntimeError("NaN in logits during _run_actor_heads")
                     if detach:
                         prob = F.softmax(logits, dim=1)
                         prob_1d = prob.squeeze().cpu().detach().numpy()
@@ -887,6 +914,9 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                     else:
                         h_i = hs[i]
                     logits = self.actor_heads[i](h_i)
+                    logits = torch.clamp(logits, -20.0, 20.0)
+                    if torch.isnan(logits).any():
+                        raise RuntimeError("NaN in logits during _run_actor_heads")
                     if detach:
                         prob = F.softmax(logits, dim=1)
                         prob_1d = prob.squeeze().cpu().detach().numpy()
