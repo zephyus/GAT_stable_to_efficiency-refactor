@@ -20,17 +20,20 @@ class GTrXLCell(nn.Module):
         
         self.proj = nn.Linear(d_input, d_model, bias=bias)
         self.attn = nn.MultiheadAttention(
-            d_model, n_head, batch_first=False, dropout=dropout, bias=bias
+            d_model, n_head, dropout=dropout, bias=bias, batch_first=False
         )
         self.ffn = nn.Sequential(
             nn.Linear(d_model, 4 * d_model, bias=bias),
             nn.GELU(),
             nn.Linear(4 * d_model, d_model, bias=bias),
         )
-        # Gating parameters (Parisotto 2019)
-        # Initialize gating so sigmoid(gate_a)≈0.5 and sigmoid(gate_b)≈0.88
-        self.gate_a = nn.Parameter(torch.zeros(d_model))
-        self.gate_b = nn.Parameter(torch.full((d_model,), 2.0))
+        # GRU-style gating parameters
+        self.W_r = nn.Linear(d_model, d_model, bias=bias)
+        self.U_r = nn.Linear(d_model, d_model, bias=bias)
+        self.W_z = nn.Linear(d_model, d_model, bias=bias)
+        self.U_z = nn.Linear(d_model, d_model, bias=bias)
+        self.W_g = nn.Linear(d_model, d_model, bias=bias)
+        self.U_g = nn.Linear(d_model, d_model, bias=bias)
         self.ln1 = nn.LayerNorm(d_model)
         self.ln2 = nn.LayerNorm(d_model)
 
@@ -64,17 +67,17 @@ class GTrXLCell(nn.Module):
         # Apply dropout
         ctx_t = F.dropout(ctx_t, p=self.dropout, training=self.training)
         
-        # Gated residual connection (Parisotto 2019 style)
-        gate_a_val = torch.sigmoid(self.gate_a)
-        gate_b_val = torch.sigmoid(self.gate_b)
-        
-        prev_h = mem_prev[-1]  # (B, d_model) - last memory state
-        h_hat = gate_a_val * prev_h + gate_b_val * ctx_t
+        # GRU-style gated residual connection
+        h_prev = mem_prev[-1]  # (B, d_model) - last memory state
+        r = torch.sigmoid(self.W_r(ctx_t) + self.U_r(h_prev))
+        z = torch.sigmoid(self.W_z(ctx_t) + self.U_z(h_prev) - 2.0)
+        h_hat = torch.tanh(self.W_g(ctx_t) + self.U_g(r * h_prev))
+        h_t = (1 - z) * h_prev + z * h_hat
         
         # Feed-forward and residual with dropout
-        ff_out = self.ffn(self.ln2(h_hat))
+        ff_out = self.ffn(self.ln2(h_t))
         ff_out = F.dropout(ff_out, p=self.dropout, training=self.training)
-        out = h_hat + ff_out
+        out = h_t + ff_out
         
         # Update memory: keep most recent mem_len timesteps
         mem_next = seq[-self.mem_len:]  # (mem_len, B, d_model)

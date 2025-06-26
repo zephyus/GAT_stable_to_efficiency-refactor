@@ -111,6 +111,7 @@ class LstmPolicy(Policy):
                            torch.from_numpy(Advs).float())
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
@@ -122,6 +123,8 @@ class LstmPolicy(Policy):
         if out_type.startswith('p'):
             self.states_fw = [m.detach() for m in new_states]
             logits = self.actor_head(h)
+            if torch.isnan(logits).any():
+                raise RuntimeError("NaN in logits during forward")
             prob = F.softmax(logits, dim=1)
             prob_1d = prob.squeeze().cpu().detach().numpy()
             # Ensure 1-D output
@@ -373,6 +376,7 @@ class NCMultiAgentPolicy(nn.Module):
         # Total loss and backpropagation
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
         
         # Optional tensorboard logging
         if summary_writer is not None:
@@ -696,6 +700,8 @@ class NCMultiAgentPolicy(nn.Module):
         outs = []
         for i, h in enumerate(hs):
             logits = self.actor_heads[i](h)
+            if torch.isnan(logits).any():
+                raise RuntimeError("NaN in logits during _run_actor_heads")
             if detach:
                 prob = F.softmax(logits, dim=1).detach().cpu().numpy()
                 # Ensure each probability vector is 1-D
@@ -786,6 +792,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
             self.entropy_loss += entropy_loss_i
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
@@ -863,6 +870,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
             for i in range(self.n_agent):
                 if i not in self.groups:
                     logits = self.actor_heads[i](hs[i])
+                    if torch.isnan(logits).any():
+                        raise RuntimeError("NaN in logits during _run_actor_heads")
                     if detach:
                         prob = F.softmax(logits, dim=1)
                         prob_1d = prob.squeeze().cpu().detach().numpy()
@@ -887,6 +896,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                     else:
                         h_i = hs[i]
                     logits = self.actor_heads[i](h_i)
+                    if torch.isnan(logits).any():
+                        raise RuntimeError("NaN in logits during _run_actor_heads")
                     if detach:
                         prob = F.softmax(logits, dim=1)
                         prob_1d = prob.squeeze().cpu().detach().numpy()
