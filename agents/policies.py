@@ -309,6 +309,7 @@ class NCMultiAgentPolicy(nn.Module):
         ob   = torch.nan_to_num(ob, nan=0.0, posinf=1e6, neginf=-1e6)
         done = torch.as_tensor(done_N,   dtype=torch.float32, device=self.dev)
         fp   = torch.as_tensor(fp_N_Dfp, dtype=torch.float32, device=self.dev).unsqueeze(0)
+        fp   = torch.nan_to_num(fp, nan=0.0, posinf=1e6, neginf=-1e6)
 
         T, N = ob.size(0), self.n_agent
         done = self._ensure_TN(done, T, N, "done")
@@ -348,6 +349,7 @@ class NCMultiAgentPolicy(nn.Module):
         else:
             dones_T_N = torch.from_numpy(dones_np).float().transpose(0, 1).to(self.dev)
         fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        fps = torch.nan_to_num(fps, nan=0.0, posinf=1e6, neginf=-1e6)
         acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
 
         # Forward pass through communication layers
@@ -775,6 +777,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         obs = obs.transpose(0, 1).to(self.dev)
         dones_T_N = torch.from_numpy(dones).float().transpose(0, 1).to(self.dev)
         fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        fps = torch.nan_to_num(fps, nan=0.0, posinf=1e6, neginf=-1e6)
         acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
 
         T, N = obs.size(0), self.n_agent
@@ -813,6 +816,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         ob = torch.nan_to_num(ob, nan=0.0, posinf=1e6, neginf=-1e6)
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float()
         fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
+        fp = torch.nan_to_num(fp, nan=0.0, posinf=1e6, neginf=-1e6)
         h, mem_list = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
             self.states_fw = [m.detach() for m in mem_list]

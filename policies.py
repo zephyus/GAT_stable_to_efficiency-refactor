@@ -237,6 +237,7 @@ class NCMultiAgentPolicy(Policy):
         obs = torch.from_numpy(obs).float().transpose(0, 1)
         dones = torch.from_numpy(dones).float()
         fps = torch.from_numpy(fps).float().transpose(0, 1)
+        fps = torch.nan_to_num(fps, nan=0.0, posinf=1e6, neginf=-1e6)
         acts = torch.from_numpy(acts).long()
         hs, new_states = self._run_comm_layers(obs, dones, fps, self.states_bw)
         # backward grad is limited to the minibatch
@@ -266,6 +267,7 @@ class NCMultiAgentPolicy(Policy):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float()
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float()
         fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
+        fp = torch.nan_to_num(fp, nan=0.0, posinf=1e6, neginf=-1e6)
         # h dim: NxTxm
         h, new_states = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
@@ -514,6 +516,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         obs = torch.from_numpy(obs).float().transpose(0, 1)
         dones = torch.from_numpy(dones).float()
         fps = torch.from_numpy(fps).float().transpose(0, 1)
+        fps = torch.nan_to_num(fps, nan=0.0, posinf=1e6, neginf=-1e6)
         acts = torch.from_numpy(acts).long()
         hs, new_states = self._run_comm_layers(obs, dones, fps, self.states_bw)
         # backward grad is limited to the minibatch
@@ -551,6 +554,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float()
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float()
         fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
+        fp = torch.nan_to_num(fp, nan=0.0, posinf=1e6, neginf=-1e6)
         # h dim: NxTxm
         h, new_states = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
