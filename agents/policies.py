@@ -329,14 +329,14 @@ class NCMultiAgentPolicy(nn.Module):
                  e_coef, v_coef, summary_writer=None, global_step=None):
         """Training backward pass for computing losses and gradients."""
         # Convert inputs to tensors and move to device
-        obs = torch.from_numpy(obs).float().to(self.dev)  # 保持 (T,N,D) 不轉置
+        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
         dones_np = np.asarray(dones)
         if dones_np.ndim == 1:
             dones_T_N = torch.from_numpy(dones_np).float().unsqueeze(-1).expand(-1, self.n_agent).to(self.dev)
         else:
-            dones_T_N = torch.from_numpy(dones_np).float().to(self.dev)
-        fps = torch.from_numpy(fps).float().to(self.dev)  # 保持 (T,N,D) 不轉置
-        acts = torch.from_numpy(acts).long().to(self.dev)  # 移除 transpose(0, 1)
+            dones_T_N = torch.from_numpy(dones_np).float().transpose(0, 1).to(self.dev)
+        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
 
         # Forward pass through communication layers
         T, N = obs.size(0), self.n_agent
@@ -357,8 +357,8 @@ class NCMultiAgentPolicy(nn.Module):
         self.entropy_loss = 0
         
         # Convert advantage and reward tensors
-        Rs = torch.from_numpy(Rs).float().to(self.dev)  # 移除 transpose(0, 1)
-        Advs = torch.from_numpy(Advs).float().to(self.dev)  # 移除 transpose(0, 1)
+        Rs = torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev)
+        Advs = torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev)
         
         # Compute losses for each agent
         for i in range(self.n_agent):
@@ -754,10 +754,10 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
 
     def backward(self, obs, fps, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
-        obs = torch.from_numpy(obs).float().to(self.dev)  # 保持 (T,N,D) 不轉置
-        dones_T_N = torch.from_numpy(dones).float().to(self.dev)
-        fps = torch.from_numpy(fps).float().to(self.dev)  # 保持 (T,N,D) 不轉置
-        acts = torch.from_numpy(acts).long().to(self.dev)  # 移除 transpose(0, 1)
+        obs = torch.from_numpy(obs).float().transpose(0, 1).to(self.dev)
+        dones_T_N = torch.from_numpy(dones).float().transpose(0, 1).to(self.dev)
+        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+        acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
 
         T, N = obs.size(0), self.n_agent
         dones_T_N = self._ensure_TN(dones_T_N, T, N, "dones")
@@ -774,8 +774,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         self.policy_loss = 0
         self.value_loss = 0
         self.entropy_loss = 0
-        Rs = torch.from_numpy(Rs).float().to(self.dev)  # 移除 transpose(0, 1)
-        Advs = torch.from_numpy(Advs).float().to(self.dev)  # 移除 transpose(0, 1)
+        Rs = torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev)
+        Advs = torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev)
         for i in range(self.n_agent):
             actor_dist_i = torch.distributions.categorical.Categorical(logits=ps[i])
             policy_loss_i, value_loss_i, entropy_loss_i = \
