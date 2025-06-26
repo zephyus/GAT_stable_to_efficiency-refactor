@@ -120,6 +120,7 @@ class LstmPolicy(Policy):
     def backward(self, obs, nactions, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
         obs = torch.from_numpy(obs).float()
+        obs = torch.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
         dones = torch.from_numpy(dones).float()
         obs = obs.cuda()
         dones = dones.cuda()
@@ -127,7 +128,9 @@ class LstmPolicy(Policy):
         hs, new_states = run_rnn(self.lstm_layer, xs, dones, self.states_bw)
         # backward grad is limited to the minibatch
         self.states_bw = new_states.detach()
-        actor_dist = torch.distributions.categorical.Categorical(logits=F.log_softmax(self.actor_head(hs), dim=1))
+        logits = self.actor_head(hs)
+        logits = torch.clamp(logits, -20.0, 20.0)
+        actor_dist = torch.distributions.categorical.Categorical(logits=F.log_softmax(logits, dim=1))
         vs = self._run_critic_head(hs, nactions)
         self.policy_loss, self.value_loss, self.entropy_loss = \
             self._run_loss(actor_dist, e_coef, v_coef, vs,
@@ -141,12 +144,16 @@ class LstmPolicy(Policy):
 
     def forward(self, ob, done, naction=None, out_type='p'):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().cuda()
+        ob = torch.nan_to_num(ob, nan=0.0, posinf=1e6, neginf=-1e6)
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float().cuda()
         x = self._encode_ob(ob)
         h, new_states = run_rnn(self.lstm_layer, x, done, self.states_fw)
         if out_type.startswith('p'):
             self.states_fw = new_states.detach()
-            return F.softmax(self.actor_head(h), dim=1).squeeze().cpu().detach().numpy()
+            logits = self.actor_head(h)
+            logits = torch.clamp(logits, -20.0, 20.0)
+            prob = F.softmax(logits, dim=1).squeeze().cpu().detach().numpy()
+            return prob
         else:
             return self._run_critic_head(h, np.array([naction])).cpu().detach().numpy()
 
@@ -396,10 +403,12 @@ class NCMultiAgentPolicy(Policy):
     def _run_actor_heads(self, hs, detach=False):
         ps = []
         for i in range(self.n_agent):
+            logits = self.actor_heads[i](hs[i])
+            logits = torch.clamp(logits, -20.0, 20.0)
             if detach:
-                p_i = F.softmax(self.actor_heads[i](hs[i]), dim=1).squeeze().cpu().detach().numpy()
+                p_i = F.softmax(logits, dim=1).squeeze().cpu().detach().numpy()
             else:
-                p_i = F.log_softmax(self.actor_heads[i](hs[i]), dim=1)
+                p_i = F.log_softmax(logits, dim=1)
             ps.append(p_i)
         return ps
 
@@ -612,10 +621,12 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         if (np.array(preactions) == None).all():
             for i in range(self.n_agent):
                 if i not in self.groups: # first hand
+                    logits = self.actor_heads[i](hs[i])
+                    logits = torch.clamp(logits, -20.0, 20.0)
                     if detach:
-                        p_i = F.softmax(self.actor_heads[i](hs[i]), dim=1).cpu().squeeze().detach().numpy()
+                        p_i = F.softmax(logits, dim=1).cpu().squeeze().detach().numpy()
                     else:
-                        p_i = F.log_softmax(self.actor_heads[i](hs[i]), dim=1)
+                        p_i = F.log_softmax(logits, dim=1)
                     ps[i] = p_i
         else:
             for i in range(self.n_agent):
@@ -630,10 +641,12 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                         h_i = torch.cat([hs[i]] + na_i_ls, dim=1)
                     else:
                         h_i = hs[i]
+                    logits = self.actor_heads[i](h_i)
+                    logits = torch.clamp(logits, -20.0, 20.0)
                     if detach:
-                        p_i = F.softmax(self.actor_heads[i](h_i), dim=1).cpu().squeeze().detach().numpy()
+                        p_i = F.softmax(logits, dim=1).cpu().squeeze().detach().numpy()
                     else:
-                        p_i = F.log_softmax(self.actor_heads[i](h_i), dim=1)
+                        p_i = F.log_softmax(logits, dim=1)
                     ps[i] = p_i
         return ps
 

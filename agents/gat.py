@@ -34,6 +34,7 @@ class GraphAttention(nn.Module):
 
     def _masked_softmax(self, e, adj):
         e_masked = e.masked_fill(adj == 0, float('-inf'))
+        e_masked = torch.clamp(e_masked, -20.0, 20.0)
         return F.softmax(e_masked, dim=1)
 
     def forward(self, h, adj):
