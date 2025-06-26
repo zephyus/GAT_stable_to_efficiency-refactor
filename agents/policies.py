@@ -611,7 +611,6 @@ class NCMultiAgentPolicy(nn.Module):
         """
         T, N, _ = obs_T_N_D.shape
         dones_T_N = dones_T_N.float()
-        assert all(m.requires_grad for m in mem_list), "memory grad truncated!"
         
         # --- 取當前隱向量：從記憶最後一個時刻提取 ---
         # mem_list[i] shape: (mem_len, B, d_model), 取 [-1, 0] -> (d_model,)
@@ -633,7 +632,7 @@ class NCMultiAgentPolicy(nn.Module):
                     # Episode reset: 如果 done=1，清空記憶
                     mem_i = mem_list[i]  # (mem_len, 1, d_model)
                     if dones_T_N[t, i] > 0.5:
-                        mem_i = torch.zeros_like(mem_i)
+                        mem_i = mem_i.detach().zero_()
                     
                     # GTrXL forward: out, new_mem = cell(x, mem)
                     h_i, mem_i = self.lstm_layers[i](
@@ -670,7 +669,7 @@ class NCMultiAgentPolicy(nn.Module):
                     # Episode reset: 如果 done=1，清空記憶
                     mem_i = mem_list[i]  # (mem_len, 1, d_model)
                     if dones_T_N[t, i] > 0.5:
-                        mem_i = torch.zeros_like(mem_i)
+                        mem_i = mem_i.detach().zero_()
                     
                     # GTrXL forward: out, new_mem = cell(x, mem)
                     h_i, mem_i = self.lstm_layers[i](
@@ -702,9 +701,9 @@ class NCMultiAgentPolicy(nn.Module):
     def _run_actor_heads(self, hs, detach=False):
         outs = []
         for i, h in enumerate(hs):
-            raw = self.actor_heads[i](h)
+            logits = self.actor_heads[i](h)
             if detach:
-                prob = F.softmax(raw, dim=1).detach().cpu().numpy()
+                prob = F.softmax(logits, dim=1).detach().cpu().numpy()
                 # Ensure each probability vector is 1-D
                 if prob.ndim > 1:
                     prob = prob.squeeze()
@@ -712,7 +711,7 @@ class NCMultiAgentPolicy(nn.Module):
                         prob = prob.flatten()
                 outs.append(prob)
             else:
-                outs.append(F.log_softmax(raw, dim=1))
+                outs.append(logits)
         return outs
 
     def _build_value_input(self, h_T_H, actions_T_N, aid):
@@ -869,8 +868,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         if (np.array(preactions) == None).all():
             for i in range(self.n_agent):
                 if i not in self.groups:
+                    logits = self.actor_heads[i](hs[i])
                     if detach:
-                        logits = self.actor_heads[i](hs[i])
                         prob = F.softmax(logits, dim=1)
                         prob_1d = prob.squeeze().cpu().detach().numpy()
                         # Ensure 1-D output
@@ -878,7 +877,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                             prob_1d = prob_1d.flatten()
                         p_i = prob_1d
                     else:
-                        p_i = F.log_softmax(self.actor_heads[i](hs[i]), dim=1)
+                        p_i = logits
                     ps[i] = p_i
         else:
             for i in range(self.n_agent):
@@ -893,8 +892,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                         h_i = torch.cat([hs[i]] + na_i_ls, dim=1)
                     else:
                         h_i = hs[i]
+                    logits = self.actor_heads[i](h_i)
                     if detach:
-                        logits = self.actor_heads[i](h_i)
                         prob = F.softmax(logits, dim=1)
                         prob_1d = prob.squeeze().cpu().detach().numpy()
                         # Ensure 1-D output
@@ -902,7 +901,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                             prob_1d = prob_1d.flatten()
                         p_i = prob_1d
                     else:
-                        p_i = F.log_softmax(self.actor_heads[i](h_i), dim=1)
+                        p_i = logits
                     ps[i] = p_i
         return ps
 

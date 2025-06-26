@@ -50,7 +50,8 @@ class GTrXLCell(nn.Module):
         x_proj = self.proj(x_t).unsqueeze(0)  # (1, B, d_model)
         
         # Concatenate memory with current input
-        seq = torch.cat([mem_prev, x_proj], dim=0)  # (mem_len+1, B, d_model)
+        mem_cat = torch.cat([mem_prev.clone(), x_proj], dim=0)
+        seq = mem_cat  # (mem_len+1, B, d_model)
         
         # Self-attention over full sequence (mem + current)
         # MultiheadAttention expects (S, N, E) when batch_first=False
@@ -70,10 +71,12 @@ class GTrXLCell(nn.Module):
         prev_h = mem_prev[-1]  # (B, d_model) - last memory state
         h_hat = gate_a_val * prev_h + gate_b_val * ctx_t
         
-        # Feed-forward and residual
-        out = h_hat + self.ffn(self.ln2(h_hat))
+        # Feed-forward and residual with dropout
+        ff_out = self.ffn(self.ln2(h_hat))
+        ff_out = F.dropout(ff_out, p=self.dropout, training=self.training)
+        out = h_hat + ff_out
         
         # Update memory: keep most recent mem_len timesteps
-        mem_next = seq[-self.mem_len:]  # (mem_len, B, d_model)
+        mem_next = mem_cat[-self.mem_len:]  # (mem_len, B, d_model)
         
         return out, mem_next
