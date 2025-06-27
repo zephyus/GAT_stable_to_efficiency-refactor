@@ -439,6 +439,12 @@ class NCMultiAgentPolicy(nn.Module):
         self.gat_layer = GraphAttention(3 * self.n_fc, 3 * self.n_fc,
                                         dropout=drop, alpha=0.2)
 
+        # pre-build optional normalisation and projection
+        if self.use_layer_norm:
+            self.pre_gat_ln = nn.LayerNorm(3 * self.n_fc)
+        if self.use_projection:
+            self.gat_output_projection = nn.Linear(3 * self.n_fc, 3 * self.n_fc)
+
         # ----- build agent-specific modules -----
         for i in range(self.n_agent):
             n_n, n_ns, n_na, ns_ls, na_ls = self._get_neighbor_dim(i)
@@ -455,6 +461,10 @@ class NCMultiAgentPolicy(nn.Module):
             self.fc_p_layers.append(fc_p)
             self.fc_m_layers.append(fc_m)
 
+            # pre-build fc_x layer for this agent
+            in_dim = self.n_s * (n_n + 1) if self.identical else \
+                     self.n_s_ls[i] + sum(ns_ls)
+            _ = self._get_fc_x(i, n_n, in_dim)
 
             # heads
             self._init_actor_head(self.n_a if self.identical else self.n_a_ls[i])
@@ -481,6 +491,16 @@ class NCMultiAgentPolicy(nn.Module):
             ns_ls.append(self.n_s_ls[j]); na_ls.append(self.n_a_ls[j])
         return n_n, self.n_s_ls[i] + sum(ns_ls), sum(na_ls), ns_ls, na_ls
 
+    def _register_if_new(self, layer: nn.Module):
+        """Register new layer params with optimizer if not already present."""
+        opt = getattr(self, "optimizer", None)
+        if opt is None:
+            return
+        existing = {p for g in opt.param_groups for p in g["params"]}
+        new_params = [p for p in layer.parameters() if p not in existing]
+        if new_params:
+            opt.add_param_group({"params": new_params})
+
 
     # ------------------------------------------------------------------#
     #  Dynamic fc_x layer (cached)                                      #
@@ -492,6 +512,7 @@ class NCMultiAgentPolicy(nn.Module):
                 logging.info(f"Creating fc_x layer: agent_{aid}_nn_{n_n}_in{in_dim} (in={in_dim})")
                 layer = nn.Linear(in_dim, self.n_fc); init_layer(layer, "fc")
                 self.fc_x_layers[key] = layer.to(self.dev)
+                self._register_if_new(layer)
         return self.fc_x_layers[key]
 
 
@@ -572,8 +593,6 @@ class NCMultiAgentPolicy(nn.Module):
         if s_flat.numel() == 0: return s_flat
 
         if self.use_layer_norm:
-            if not hasattr(self, "pre_gat_ln"):
-                self.pre_gat_ln = nn.LayerNorm(s_flat.size(1)).to(self.dev)
             s_in = self.pre_gat_ln(s_flat)
         else:
             s_in = s_flat
@@ -607,8 +626,6 @@ class NCMultiAgentPolicy(nn.Module):
         out = torch.cat(outputs, dim=0)  # (T*N, D)
 
         if self.use_projection:
-            if not hasattr(self, "gat_output_projection"):
-                self.gat_output_projection = nn.Linear(out.size(1), s_flat.size(1)).to(self.dev)
             out = self.gat_output_projection(out)
 
         return s_flat + out if self.use_residual else out
