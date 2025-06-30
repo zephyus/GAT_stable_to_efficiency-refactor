@@ -5,6 +5,13 @@ import torch.nn.functional as F
 import os
 import logging
 from agents.utils import batch_to_seq, init_layer, one_hot, run_rnn
+
+# ---------------------------------------------------------------------------
+#  Utility: clean observation tensors
+# ---------------------------------------------------------------------------
+def _clean(x: torch.Tensor, clip: float = 50.0) -> torch.Tensor:
+    """Replace NaN/Inf with 0 and clamp extreme values."""
+    return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp_(-clip, clip)
 from agents.gat import GraphAttention
 import threading
 
@@ -96,7 +103,7 @@ class LstmPolicy(Policy):
     def backward(self, obs, nactions, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
         obs = torch.from_numpy(obs).float()
-        obs = torch.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
+        obs = _clean(obs)
         dones = torch.from_numpy(dones).float()
         obs = obs.cuda()
         dones = dones.cuda()
@@ -120,7 +127,7 @@ class LstmPolicy(Policy):
 
     def forward(self, ob, done, naction=None, out_type='p'):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float().cuda()
-        ob = torch.nan_to_num(ob, nan=0.0, posinf=1e6, neginf=-1e6)
+        ob = _clean(ob)
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float().cuda()
         x = self._encode_ob(ob)
         h, new_states = run_rnn(self.lstm_layer, x, done, self.states_fw)
@@ -306,10 +313,10 @@ class NCMultiAgentPolicy(nn.Module):
     def forward(self, ob_N_Do, done_N, fp_N_Dfp, action=None, out_type="p"):
         """Single-step inference (API 與舊版相容)."""
         ob   = torch.as_tensor(ob_N_Do, dtype=torch.float32, device=self.dev).unsqueeze(0)
-        ob   = torch.nan_to_num(ob, nan=0.0, posinf=1e6, neginf=-1e6)
+        ob   = _clean(ob)
         done = torch.as_tensor(done_N,   dtype=torch.float32, device=self.dev)
         fp   = torch.as_tensor(fp_N_Dfp, dtype=torch.float32, device=self.dev).unsqueeze(0)
-        fp   = torch.nan_to_num(fp, nan=0.0, posinf=1e6, neginf=-1e6)
+        fp   = _clean(fp)
 
         T, N = ob.size(0), self.n_agent
         done = self._ensure_TN(done, T, N, "done")
@@ -341,7 +348,7 @@ class NCMultiAgentPolicy(nn.Module):
         """Training backward pass for computing losses and gradients."""
         # Convert inputs to tensors and move to device
         obs = torch.from_numpy(obs).float()
-        obs = torch.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
+        obs = _clean(obs)
         obs = obs.transpose(0, 1).to(self.dev)
         dones_np = np.asarray(dones)
         if dones_np.ndim == 1:
@@ -349,7 +356,7 @@ class NCMultiAgentPolicy(nn.Module):
         else:
             dones_T_N = torch.from_numpy(dones_np).float().transpose(0, 1).to(self.dev)
         fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
-        fps = torch.nan_to_num(fps, nan=0.0, posinf=1e6, neginf=-1e6)
+        fps = _clean(fps)
         acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
 
         # Forward pass through communication layers
@@ -790,11 +797,11 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
     def backward(self, obs, fps, acts, dones, Rs, Advs,
                  e_coef, v_coef, summary_writer=None, global_step=None):
         obs = torch.from_numpy(obs).float()
-        obs = torch.nan_to_num(obs, nan=0.0, posinf=1e6, neginf=-1e6)
+        obs = _clean(obs)
         obs = obs.transpose(0, 1).to(self.dev)
         dones_T_N = torch.from_numpy(dones).float().transpose(0, 1).to(self.dev)
         fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
-        fps = torch.nan_to_num(fps, nan=0.0, posinf=1e6, neginf=-1e6)
+        fps = _clean(fps)
         acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
 
         T, N = obs.size(0), self.n_agent
@@ -830,10 +837,10 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
 
     def forward(self, ob, done, fp, action=None, out_type='p'):
         ob = torch.from_numpy(np.expand_dims(ob, axis=0)).float()
-        ob = torch.nan_to_num(ob, nan=0.0, posinf=1e6, neginf=-1e6)
+        ob = _clean(ob)
         done = torch.from_numpy(np.expand_dims(done, axis=0)).float()
         fp = torch.from_numpy(np.expand_dims(fp, axis=0)).float()
-        fp = torch.nan_to_num(fp, nan=0.0, posinf=1e6, neginf=-1e6)
+        fp = _clean(fp)
         h, mem_list = self._run_comm_layers(ob, done, fp, self.states_fw)
         if out_type.startswith('p'):
             self.states_fw = [m.detach() for m in mem_list]

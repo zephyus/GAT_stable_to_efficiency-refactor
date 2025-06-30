@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import Tuple
+import math
 
 class GTrXLCell(nn.Module):
     """Transformer-style cell with memory.
@@ -22,6 +23,7 @@ class GTrXLCell(nn.Module):
         self.attn = nn.MultiheadAttention(
             d_model, n_head, dropout=dropout, bias=bias, batch_first=False
         )
+        self.head_dim = d_model // n_head
         self.ffn = nn.Sequential(
             nn.Linear(d_model, 4 * d_model, bias=bias),
             nn.GELU(),
@@ -62,7 +64,22 @@ class GTrXLCell(nn.Module):
         if torch.isnan(seq_ln).any() or torch.isinf(seq_ln).any():
             raise RuntimeError(
                 "NaN/Inf DETECTED: Input to Attention block is invalid.")
-        ctx, _ = self.attn(seq_ln, seq_ln, seq_ln, need_weights=False)  # (mem_len+1, B, d_model)
+
+        # Manual multi-head self-attention with score clamping
+        L = seq_ln.size(0)
+        qkv = F.linear(seq_ln, self.attn.in_proj_weight, self.attn.in_proj_bias)
+        q, k, v = qkv.chunk(3, dim=-1)
+        q = q.contiguous().view(L, B, self.n_head, self.head_dim).transpose(0, 1).transpose(1, 2)
+        k = k.contiguous().view(L, B, self.n_head, self.head_dim).transpose(0, 1).transpose(1, 2)
+        v = v.contiguous().view(L, B, self.n_head, self.head_dim).transpose(0, 1).transpose(1, 2)
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        scores = scores.clamp(-80.0, 80.0)
+        attn = F.softmax(scores, dim=-1)
+        attn = F.dropout(attn, p=self.dropout, training=self.training)
+        ctx = torch.matmul(attn, v)
+        ctx = ctx.transpose(1, 2).contiguous().view(B, L, self.d_model)
+        ctx = ctx.transpose(0, 1)
+        ctx = F.linear(ctx, self.attn.out_proj.weight, self.attn.out_proj.bias)
         if torch.isnan(ctx).any() or torch.isinf(ctx).any():
             raise RuntimeError(
                 "NaN/Inf DETECTED: Output of Attention block is invalid.")
