@@ -23,6 +23,7 @@ class GTrXLCell(nn.Module):
         self.attn = nn.MultiheadAttention(
             d_model, n_head, dropout=dropout, bias=bias, batch_first=False
         )
+        assert d_model % n_head == 0, "d_model not divisible by n_head"
         self.head_dim = d_model // n_head
         self.ffn = nn.Sequential(
             nn.Linear(d_model, 4 * d_model, bias=bias),
@@ -67,19 +68,20 @@ class GTrXLCell(nn.Module):
 
         # Manual multi-head self-attention with score clamping
         L = seq_ln.size(0)
-        qkv = F.linear(seq_ln, self.attn.in_proj_weight, self.attn.in_proj_bias)
+        seq_t = seq_ln.transpose(0, 1)  # (B, L, d_model)
+        qkv = F.linear(seq_t, self.attn.in_proj_weight, self.attn.in_proj_bias)
         q, k, v = qkv.chunk(3, dim=-1)
-        q = q.contiguous().view(L, B, self.n_head, self.head_dim).transpose(0, 1).transpose(1, 2)
-        k = k.contiguous().view(L, B, self.n_head, self.head_dim).transpose(0, 1).transpose(1, 2)
-        v = v.contiguous().view(L, B, self.n_head, self.head_dim).transpose(0, 1).transpose(1, 2)
+        q = q.view(B, L, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(B, L, self.n_head, self.head_dim).transpose(1, 2)
+        v = v.view(B, L, self.n_head, self.head_dim).transpose(1, 2)
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        scores = scores.clamp(-80.0, 80.0)
+        scores.clamp_(-80.0, 80.0)
         attn = F.softmax(scores, dim=-1)
         attn = F.dropout(attn, p=self.dropout, training=self.training)
         ctx = torch.matmul(attn, v)
-        ctx = ctx.transpose(1, 2).contiguous().view(B, L, self.d_model)
-        ctx = ctx.transpose(0, 1)
+        ctx = ctx.transpose(1, 2).reshape(B, L, self.d_model)
         ctx = F.linear(ctx, self.attn.out_proj.weight, self.attn.out_proj.bias)
+        ctx = ctx.transpose(0, 1)
         if torch.isnan(ctx).any() or torch.isinf(ctx).any():
             raise RuntimeError(
                 "NaN/Inf DETECTED: Output of Attention block is invalid.")

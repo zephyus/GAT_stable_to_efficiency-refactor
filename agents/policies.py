@@ -121,7 +121,8 @@ class LstmPolicy(Policy):
                            torch.from_numpy(Advs).float())
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        assert torch.isfinite(grad_norm), "Non-finite gradient norm"
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
@@ -394,7 +395,8 @@ class NCMultiAgentPolicy(nn.Module):
         # Total loss and backpropagation
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        assert torch.isfinite(grad_norm), "Non-finite gradient norm"
         
         # Optional tensorboard logging
         if summary_writer is not None:
@@ -831,7 +833,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
             self.entropy_loss += entropy_loss_i
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        assert torch.isfinite(grad_norm), "Non-finite gradient norm"
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
