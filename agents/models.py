@@ -47,7 +47,8 @@ class IA2C:
                 self.policy[i].backward(obs, nas, acts, dones, Rs, Advs,
                                         self.e_coef, self.v_coef)
         if self.max_grad_norm > 0:
-            nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            assert torch.isfinite(grad_norm), "Non-finite gradient norm"
         self.optimizer.step()
         if self.lr_decay != 'constant':
             self._update_lr()
@@ -286,7 +287,8 @@ class MA2C_NC(IA2C):
         self.policy.backward(obs, ps, acts, dones, Rs, Advs, self.e_coef, self.v_coef,
                              summary_writer=summary_writer, global_step=global_step)
         if self.max_grad_norm > 0:
-            nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            grad_norm = nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+            assert torch.isfinite(grad_norm), "Non-finite gradient norm"
         self.optimizer.step()
         if self.lr_decay != 'constant':
             self._update_lr()
