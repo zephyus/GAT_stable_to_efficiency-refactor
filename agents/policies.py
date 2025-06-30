@@ -4,14 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import os
 import logging
-from agents.utils import batch_to_seq, init_layer, one_hot, run_rnn
-
-# ---------------------------------------------------------------------------
-#  Utility: clean observation tensors
-# ---------------------------------------------------------------------------
-def _clean(x: torch.Tensor, clip: float = 50.0) -> torch.Tensor:
-    """Replace NaN/Inf with 0 and clamp extreme values."""
-    return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp_(-clip, clip)
+from agents.utils import batch_to_seq, init_layer, one_hot, run_rnn, _clean
 from agents.gat import GraphAttention
 import threading
 

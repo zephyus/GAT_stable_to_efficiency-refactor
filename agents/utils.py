@@ -4,6 +4,11 @@ import torch.nn as nn
 import logging
 import sys # Import sys for StreamHandler
 
+def _clean(x: torch.Tensor, clip: float = 50.0) -> torch.Tensor:
+    """Replace NaN/Inf with 0 and clip extreme values."""
+    x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+    return x.clamp_(-clip, clip)
+
 """
 initializers
 """
