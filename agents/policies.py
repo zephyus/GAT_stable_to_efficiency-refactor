@@ -305,10 +305,10 @@ class NCMultiAgentPolicy(nn.Module):
     @torch.no_grad()
     def forward(self, ob_N_Do, done_N, fp_N_Dfp, action=None, out_type="p"):
         """Single-step inference (API 與舊版相容)."""
-        ob   = torch.as_tensor(ob_N_Do, dtype=torch.float32, device=self.dev).unsqueeze(0)
+        ob   = torch.as_tensor(ob_N_Do, dtype=torch.float32).to(self.dev).unsqueeze(0)
         ob   = _clean(ob)
-        done = torch.as_tensor(done_N,   dtype=torch.float32, device=self.dev)
-        fp   = torch.as_tensor(fp_N_Dfp, dtype=torch.float32, device=self.dev).unsqueeze(0)
+        done = torch.as_tensor(done_N,   dtype=torch.float32).to(self.dev)
+        fp   = torch.as_tensor(fp_N_Dfp, dtype=torch.float32).to(self.dev).unsqueeze(0)
         fp   = _clean(fp)
 
         T, N = ob.size(0), self.n_agent
@@ -331,7 +331,7 @@ class NCMultiAgentPolicy(nn.Module):
                 probs.append(prob_1d)
             return probs
         else:
-            act = torch.as_tensor(action, dtype=torch.long, device=self.dev).unsqueeze(0)
+            act = torch.as_tensor(action, dtype=torch.long).to(self.dev).unsqueeze(0)
             vals = self._run_critic_heads(hs_N_T_H, act, detach=True)
             return vals
 
