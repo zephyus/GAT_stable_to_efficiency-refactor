@@ -4,14 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import os
 import logging
-from agents.utils import batch_to_seq, init_layer, one_hot, run_rnn
-
-# ---------------------------------------------------------------------------
-#  Utility: clean observation tensors
-# ---------------------------------------------------------------------------
-def _clean(x: torch.Tensor, clip: float = 50.0) -> torch.Tensor:
-    """Replace NaN/Inf with 0 and clamp extreme values."""
-    return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).clamp_(-clip, clip)
+from agents.utils import batch_to_seq, init_layer, one_hot, run_rnn, _clean
 from agents.gat import GraphAttention
 import threading
 
@@ -349,15 +342,30 @@ class NCMultiAgentPolicy(nn.Module):
         # Convert inputs to tensors and move to device
         obs = torch.from_numpy(obs).float()
         obs = _clean(obs)
-        obs = obs.transpose(0, 1).to(self.dev)
+        # Support input as (T,N,D) or (N,T,D)
+        if obs.dim() == 3 and obs.size(0) == self.n_agent and obs.size(1) != self.n_agent:
+            # (N,T,D) -> (T,N,D)
+            obs = obs.transpose(0, 1)
+        obs = obs.to(self.dev)
         dones_np = np.asarray(dones)
         if dones_np.ndim == 1:
-            dones_T_N = torch.from_numpy(dones_np).float().unsqueeze(-1).expand(-1, self.n_agent).to(self.dev)
+            dones_T_N = torch.from_numpy(dones_np).float().unsqueeze(-1).expand(-1, self.n_agent)
         else:
-            dones_T_N = torch.from_numpy(dones_np).float().transpose(0, 1).to(self.dev)
-        fps = torch.from_numpy(fps).float().transpose(0, 1).to(self.dev)
+            dones_T_N = torch.from_numpy(dones_np).float()
+            if dones_T_N.dim() == 2 and dones_T_N.size(0) == self.n_agent and dones_T_N.size(1) != self.n_agent:
+                dones_T_N = dones_T_N.transpose(0, 1)
+        dones_T_N = dones_T_N.to(self.dev)
+
+        fps = torch.from_numpy(fps).float()
         fps = _clean(fps)
-        acts = torch.from_numpy(acts).long().transpose(0, 1).to(self.dev)
+        if fps.dim() == 3 and fps.size(0) == self.n_agent and fps.size(1) != self.n_agent:
+            fps = fps.transpose(0, 1)
+        fps = fps.to(self.dev)
+
+        acts = torch.from_numpy(acts).long()
+        if acts.dim() >= 2 and acts.size(0) == self.n_agent and acts.size(1) != self.n_agent:
+            acts = acts.transpose(0, 1)
+        acts = acts.to(self.dev)
 
         # Forward pass through communication layers
         T, N = obs.size(0), self.n_agent
@@ -378,8 +386,14 @@ class NCMultiAgentPolicy(nn.Module):
         self.entropy_loss = 0
         
         # Convert advantage and reward tensors
-        Rs = torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev)
-        Advs = torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev)
+        Rs_t = torch.from_numpy(Rs).float()
+        Advs_t = torch.from_numpy(Advs).float()
+        if Rs_t.dim() >= 2 and Rs_t.size(0) == self.n_agent and Rs_t.size(1) != self.n_agent:
+            Rs_t = Rs_t.transpose(0, 1)
+        if Advs_t.dim() >= 2 and Advs_t.size(0) == self.n_agent and Advs_t.size(1) != self.n_agent:
+            Advs_t = Advs_t.transpose(0, 1)
+        Rs = Rs_t.to(self.dev)
+        Advs = Advs_t.to(self.dev)
         
         # Compute losses for each agent
         for i in range(self.n_agent):
