@@ -43,54 +43,27 @@ def init_dir(base_dir, pathes=['log', 'data', 'model']):
     return dirs
 
 
-def init_log(log_file=None):
-    # Configure root logger
+def init_log(log_file=None, force=False):
     log_format = '%(asctime)s [%(levelname)s] %(message)s'
-    log_level = logging.DEBUG # Set level to DEBUG for detailed output
+    log_level = logging.INFO
 
-    # Remove all existing handlers from the root logger
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
+    if force or not logging.root.handlers:
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
 
-    # Create a custom handler that handles encoding issues
-    import sys
-    import io
-    
-    class UTF8Handler(logging.StreamHandler):
-        def emit(self, record):
-            try:
-                msg = self.format(record)
-                stream = self.stream
-                # Try to write with UTF-8, fallback to errors='replace' if needed
-                try:
-                    stream.write(msg + self.terminator)
-                except UnicodeEncodeError:
-                    # Fallback: encode with errors='replace' and decode back
-                    msg_bytes = msg.encode('utf-8', errors='replace')
-                    msg_safe = msg_bytes.decode('utf-8')
-                    stream.write(msg_safe + self.terminator)
-                self.flush()
-            except Exception:
-                self.handleError(record)
-    
-    # Create and configure the handler
-    handler = UTF8Handler(sys.stdout)
-    handler.setFormatter(logging.Formatter(log_format))
-    
-    # Configure the root logger
-    root_logger = logging.getLogger()
-    root_logger.setLevel(log_level)
-    root_logger.addHandler(handler)
+        logging.basicConfig(
+            level=log_level,
+            format=log_format,
+            stream=sys.stdout
+        )
 
-    # Ensure FileHandler remains commented out/inactive
-    # if log_file:
-    #     file_handler = logging.FileHandler(log_file, mode='a')
-    #     file_handler.setFormatter(logging.Formatter(log_format))
-    #     logging.getLogger().addHandler(file_handler) # Add handler to the root logger
-
-    # Log the configuration (optional, kept for consistency)
     if log_file:
-        # This part will not be reached if log_file is None, but kept for structure
+        if not any(isinstance(h, logging.FileHandler) and h.baseFilename == log_file for h in logging.root.handlers):
+            file_handler = logging.FileHandler(log_file, mode='a')
+            file_handler.setFormatter(logging.Formatter(log_format))
+            logging.getLogger().addHandler(file_handler)
+
+    if log_file:
         logging.info(f"Logging configured. Level: {logging.getLevelName(log_level)}. Outputting to Console and File: {log_file}")
     else:
         logging.info(f"Logging configured. Level: {logging.getLevelName(log_level)}. Outputting to Console (stdout).")
