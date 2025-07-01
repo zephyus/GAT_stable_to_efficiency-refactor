@@ -50,10 +50,13 @@ def run_rnn(layer, xs, dones, s):
     dones = batch_to_seq(dones)
     n_in = int(xs[0].shape[1])
     n_out = int(s.shape[0]) // 2
+
+    device = xs[0].device
+
     s = torch.unsqueeze(s, 0)
     h, c = torch.chunk(s, 2, dim=1)
-    h = h.cuda()
-    c = c.cuda()
+    h = h.to(device)
+    c = c.to(device)
     outputs = []
     for ind, (x, done) in enumerate(zip(xs, dones)):
         c = c * (1-done)
@@ -70,7 +73,9 @@ def one_hot(x, oh_dim, dim=-1):
         oh_shape.append(oh_dim)
     else:
         oh_shape = oh_shape[:dim+1] + [oh_dim] + oh_shape[dim+1:]
-    x_oh = torch.zeros(oh_shape)
+
+    x_oh = torch.zeros(oh_shape, device=x.device)
+
     x = torch.unsqueeze(x, -1)
     if dim == -1:
         x_oh = x_oh.scatter(dim, x, 1)
@@ -134,7 +139,7 @@ class OnPolicyBuffer(TransBuffer):
         Rs = np.array(self.Rs, dtype=np.float32)
         Advs = np.array(self.Advs, dtype=np.float32)
         # use pre-step dones here
-        dones = np.array(self.dones[:-1], dtype=np.bool)
+        dones = np.array(self.dones[:-1], dtype=bool)
         self.reset(self.dones[-1])
         return obs, nas, acts, dones, Rs, Advs
 
@@ -152,28 +157,6 @@ class OnPolicyBuffer(TransBuffer):
         self.Rs = Rs
         self.Advs = Advs
 
-    def _add_st_R_Adv(self, R, dt):
-        Rs = []
-        Advs = []
-        # use post-step dones here
-        tdiff = dt
-        for r, v, done in zip(self.rs[::-1], self.vs[::-1], self.dones[:0:-1]):
-            R = self.gamma * R * (1.-done)
-            if done:
-                tdiff = 0
-            # additional spatial rewards
-            tmax = min(tdiff, self.max_distance)
-            for t in range(tmax + 1):
-                rt = np.sum(r[self.distance_mask == t])
-                R += (self.gamma * self.alpha) ** t * rt
-            Adv = R - v
-            tdiff += 1
-            Rs.append(R)
-            Advs.append(Adv)
-        Rs.reverse()
-        Advs.reverse()
-        self.Rs = Rs
-        self.Advs = Advs
 
     def _add_s_R_Adv(self, R):
         Rs = []
@@ -208,7 +191,7 @@ class MultiAgentOnPolicyBuffer(OnPolicyBuffer):
         acts = np.transpose(np.array(self.acts, dtype=np.int32))
         Rs = np.array(self.Rs, dtype=np.float32)
         Advs = np.array(self.Advs, dtype=np.float32)
-        dones = np.array(self.dones[:-1], dtype=np.bool)
+        dones = np.array(self.dones[:-1], dtype=bool)
         self.reset(self.dones[-1])
         return obs, policies, acts, dones, Rs, Advs
 
@@ -232,36 +215,6 @@ class MultiAgentOnPolicyBuffer(OnPolicyBuffer):
         self.Rs = np.array(Rs)
         self.Advs = np.array(Advs)
 
-    def _add_st_R_Adv(self, R, dt):
-        Rs = []
-        Advs = []
-        vs = np.array(self.vs)
-        for i in range(vs.shape[1]):
-            cur_Rs = []
-            cur_Advs = []
-            cur_R = R[i]
-            tdiff = dt
-            distance_mask = self.distance_mask[i]
-            max_distance = self.max_distance[i]
-            for r, v, done in zip(self.rs[::-1], vs[::-1,i], self.dones[:0:-1]):
-                cur_R = self.gamma * cur_R * (1.-done)
-                if done:
-                    tdiff = 0
-                # additional spatial rewards
-                tmax = min(tdiff, max_distance)
-                for t in range(tmax + 1):
-                    rt = np.sum(r[distance_mask==t])
-                    cur_R += (self.gamma * self.alpha) ** t * rt
-                cur_Adv = cur_R - v
-                tdiff += 1
-                cur_Rs.append(cur_R)
-                cur_Advs.append(cur_Adv)
-            cur_Rs.reverse()
-            cur_Advs.reverse()
-            Rs.append(cur_Rs)
-            Advs.append(cur_Advs)
-        self.Rs = np.array(Rs)
-        self.Advs = np.array(Advs)
 
     def _add_s_R_Adv(self, R):
         Rs = []
@@ -303,34 +256,36 @@ class Scheduler:
     def get(self, n_step):
         self.n += n_step
         if self.decay == 'linear':
-            return max(self.val_min, self.val * (1 - self.n / self.N))
+            if self.N > 0:
+                ratio = 1.0 - self.n / self.N
+            else:
+                ratio = 0.0
+            current_val = self.val * max(0.0, ratio)
+            return max(self.val_min, current_val)
         else:
             return self.val
 
 
-def init_log(log_file=None):
-    # Configure root logger
+def init_log(log_file=None, force=False):
     log_format = '%(asctime)s [%(levelname)s] %(message)s'
-    log_level = logging.INFO # Or logging.DEBUG for more verbose output
+    log_level = logging.INFO
 
-    # Remove all existing handlers from the root logger
-    for handler in logging.root.handlers[:]:
-        logging.root.removeHandler(handler)
+    if force or not logging.root.handlers:
+        for handler in logging.root.handlers[:]:
+            logging.root.removeHandler(handler)
 
-    # Set basic config - this sets up a StreamHandler by default if filename is None
-    logging.basicConfig(
-        level=log_level,
-        format=log_format,
-        stream=sys.stdout # Explicitly set stream to stdout
-    )
+        logging.basicConfig(
+            level=log_level,
+            format=log_format,
+            stream=sys.stdout
+        )
 
-    # If a log file is provided, add a FileHandler as well
-    # if log_file:
-    #     file_handler = logging.FileHandler(log_file, mode='a')
-    #     file_handler.setFormatter(logging.Formatter(log_format))
-    #     logging.getLogger().addHandler(file_handler) # Add handler to the root logger
+    if log_file:
+        if not any(isinstance(h, logging.FileHandler) and h.baseFilename == log_file for h in logging.root.handlers):
+            file_handler = logging.FileHandler(log_file, mode='a')
+            file_handler.setFormatter(logging.Formatter(log_format))
+            logging.getLogger().addHandler(file_handler)
 
-    # Log the configuration
     if log_file:
         logging.info(f"Logging configured. Level: {logging.getLevelName(log_level)}. Outputting to Console and File: {log_file}")
     else:

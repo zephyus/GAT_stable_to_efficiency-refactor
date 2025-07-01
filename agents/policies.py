@@ -564,7 +564,7 @@ class NCMultiAgentPolicy(nn.Module):
             if n_n:
                 m_i = h_N_H[idx_n].reshape(1, n_n * H)
             else:
-                m_i = torch.zeros(1, 0, device=device)
+                m_i = x_N_Do.new_zeros((1, 0))
 
             if self.identical:
                 x_i = x_N_Do[i].unsqueeze(0)
@@ -573,9 +573,9 @@ class NCMultiAgentPolicy(nn.Module):
                     if fps_dim:
                         p_i = fp_N_Dfp[idx_n].reshape(1, n_n * fps_dim)
                     else:
-                        p_i = torch.zeros(1, 0, device=device)
+                        p_i = x_N_Do.new_zeros((1, 0))
                 else:
-                    nx_i = torch.zeros(1, 0, device=device)
+                    nx_i = x_N_Do.new_zeros((1, 0))
                     p_i = nx_i
                 fc_x_in = torch.cat([x_i, nx_i], dim=1)
             else:
@@ -588,8 +588,8 @@ class NCMultiAgentPolicy(nn.Module):
                     if fps_dim:
                         p_seg = fp_N_Dfp[j, :self.na_ls_ls[i][k]].unsqueeze(0)
                         p_i.append(p_seg)
-                nx_i = torch.cat(nx_i, dim=1) if nx_i else torch.zeros(1, 0, device=device)
-                p_i = torch.cat(p_i, dim=1) if p_i else torch.zeros(1, 0, device=device)
+                nx_i = torch.cat(nx_i, dim=1) if nx_i else x_N_Do.new_zeros((1, 0))
+                p_i = torch.cat(p_i, dim=1) if p_i else x_N_Do.new_zeros((1, 0))
                 fc_x_in = torch.cat([x_raw, nx_i], dim=1)
 
             s_x = F.relu(self._get_fc_x(i, n_n, fc_x_in.size(1))(fc_x_in))
@@ -598,8 +598,8 @@ class NCMultiAgentPolicy(nn.Module):
                     p_i = x_N_Do.new_zeros(1, self.fc_p_layers[i].in_features)
                 s_p = F.relu(self.fc_p_layers[i](p_i))
             else:
-                s_p = torch.zeros(1, n_fc, device=device)
-            s_m = F.relu(self.fc_m_layers[i](m_i)) if n_n else torch.zeros(1, n_fc, device=device)
+                s_p = s_x.new_zeros((1, n_fc))
+            s_m = F.relu(self.fc_m_layers[i](m_i)) if n_n else s_x.new_zeros((1, n_fc))
             s_cat.append(torch.cat([s_x, s_p, s_m], dim=1))
 
         return torch.cat(s_cat, dim=0)
