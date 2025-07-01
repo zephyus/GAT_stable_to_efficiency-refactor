@@ -66,9 +66,25 @@ class GTrXLCell(nn.Module):
             raise RuntimeError(
                 "NaN/Inf DETECTED: Input to Attention block is invalid.")
 
-        # Built-in multi-head self-attention with clamped weights
-        ctx, attn_w = self.attn(seq_ln, seq_ln, seq_ln, need_weights=True)
-        attn_w.clamp_(0.0, 1.0)
+        # Manual multi-head self-attention with score clamping
+        L = seq_ln.size(0)
+        seq_t = seq_ln.transpose(0, 1)  # (B, L, d_model)
+        qkv = F.linear(seq_t, self.attn.in_proj_weight,
+                       self.attn.in_proj_bias)
+        q, k, v = qkv.chunk(3, dim=-1)
+        q = q.view(B, L, self.n_head, self.head_dim).transpose(1, 2)
+        k = k.view(B, L, self.n_head, self.head_dim).transpose(1, 2)
+        v = v.view(B, L, self.n_head, self.head_dim).transpose(1, 2)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
+        scores.clamp_(-80.0, 80.0)  # prevent overflow
+        attn = F.softmax(scores, dim=-1)
+        attn = F.dropout(attn, p=self.dropout, training=self.training)
+        ctx = torch.matmul(attn, v)
+        ctx = ctx.transpose(1, 2).reshape(B, L, self.d_model)
+        ctx = F.linear(ctx, self.attn.out_proj.weight,
+                             self.attn.out_proj.bias)
+        ctx = ctx.transpose(0, 1)
         if torch.isnan(ctx).any() or torch.isinf(ctx).any():
             raise RuntimeError(
                 "NaN/Inf DETECTED: Output of Attention block is invalid.")
