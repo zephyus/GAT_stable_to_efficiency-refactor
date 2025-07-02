@@ -416,7 +416,6 @@ class NCMultiAgentPolicy(nn.Module):
         self.loss.backward()
         for p in self.parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
-
                 p.grad.zero_()
         torch.nn.utils.clip_grad_norm_(self.parameters(), 0.7)
         
