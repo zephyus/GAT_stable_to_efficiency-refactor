@@ -65,6 +65,8 @@ class Policy(nn.Module):
         Advs = Advs.cuda()
         Rs = Rs.cuda()
         log_probs = actor_dist.log_prob(As)
+        log_probs = torch.nan_to_num(log_probs, nan=0.0, posinf=0.0, neginf=0.0)
+        Advs = torch.nan_to_num(Advs, nan=0.0, posinf=0.0, neginf=0.0)
         policy_loss = -(log_probs * Advs).mean()
         entropy_loss = -(actor_dist.entropy()).mean() * e_coef
         value_loss = (Rs - vs).pow(2).mean() * v_coef
@@ -107,14 +109,18 @@ class LstmPolicy(Policy):
         logits = torch.clamp(logits, -20.0, 20.0)
         actor_dist = torch.distributions.categorical.Categorical(logits=F.log_softmax(logits, dim=1))
         vs = self._run_critic_head(hs, nactions)
+        Rs_t = _clean(torch.from_numpy(Rs).float())
+        Advs_t = _clean(torch.from_numpy(Advs).float())
         self.policy_loss, self.value_loss, self.entropy_loss = \
             self._run_loss(actor_dist, e_coef, v_coef, vs,
                            torch.from_numpy(acts).long(),
-                           torch.from_numpy(Rs).float(),
-                           torch.from_numpy(Advs).float())
+                           Rs_t, Advs_t)
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        for p in self.parameters():
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                p.grad.zero_()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 0.7)
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
@@ -392,8 +398,8 @@ class NCMultiAgentPolicy(nn.Module):
             Rs_t = Rs_t.transpose(0, 1)
         if Advs_t.dim() >= 2 and Advs_t.size(0) == self.n_agent and Advs_t.size(1) != self.n_agent:
             Advs_t = Advs_t.transpose(0, 1)
-        Rs = Rs_t.to(self.dev)
-        Advs = Advs_t.to(self.dev)
+        Rs = _clean(Rs_t.to(self.dev))
+        Advs = _clean(Advs_t.to(self.dev))
         
         # Compute losses for each agent
         for i in range(self.n_agent):
@@ -408,7 +414,10 @@ class NCMultiAgentPolicy(nn.Module):
         # Total loss and backpropagation
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        for p in self.parameters():
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                p.grad.zero_()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 0.7)
         
         # Optional tensorboard logging
         if summary_writer is not None:
@@ -417,6 +426,8 @@ class NCMultiAgentPolicy(nn.Module):
     def _run_loss(self, actor_dist, e_coef, v_coef, vs, As, Rs, Advs):
         """Compute individual loss components for a single agent."""
         log_probs = actor_dist.log_prob(As)
+        log_probs = torch.nan_to_num(log_probs, nan=0.0, posinf=0.0, neginf=0.0)
+        Advs      = torch.nan_to_num(Advs, nan=0.0, posinf=0.0, neginf=0.0)
         policy_loss = -(log_probs * Advs).mean()
         entropy_loss = -(actor_dist.entropy()).mean() * e_coef
         value_loss = (Rs - vs).pow(2).mean() * v_coef
@@ -613,6 +624,8 @@ class NCMultiAgentPolicy(nn.Module):
             return s_flat
         if s_flat.numel() == 0: return s_flat
 
+        s_flat = _clean(s_flat)
+
         if self.use_layer_norm:
             s_in = self.pre_gat_ln(s_flat)
         else:
@@ -637,6 +650,8 @@ class NCMultiAgentPolicy(nn.Module):
             
             # Apply GAT for this timestep
             out_t, att_t = self.gat_layer(s_t, adj_t)
+            out_t = _clean(out_t)
+            att_t = _clean(att_t)
             outputs.append(out_t)
             
             # Store attention scores from the last timestep
@@ -676,6 +691,7 @@ class NCMultiAgentPolicy(nn.Module):
                 fp_t = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
                 s_flat_t = self._compute_s_features_flat_step(obs_T_N_D[t], fp_t, h)
                 s_after = self._apply_gat(s_flat_t)
+                s_after = _clean(s_after)
 
                 out_list, h_list = [], []
                 current_new_mems = []
@@ -696,6 +712,7 @@ class NCMultiAgentPolicy(nn.Module):
                     current_new_mems.append(mem_i)
                 
                 h = torch.stack(h_list, dim=0)  # (N, H)
+                h = _clean(h)
                 outs.append(torch.cat(out_list, dim=0))  # (N, H)
                 
                 # --- 修復 B1: 每步後立即更新記憶 ---
@@ -710,6 +727,7 @@ class NCMultiAgentPolicy(nn.Module):
                 fp_t = fps_T_N_Dfp[t] if fps_T_N_Dfp is not None else None
                 s_t = self._compute_s_features_flat_step(obs_T_N_D[t], fp_t, h)
                 s_t = self._apply_gat(s_t)
+                s_t = _clean(s_t)
 
                 out_list, h_list = [], []
                 current_new_mems = []
@@ -730,6 +748,7 @@ class NCMultiAgentPolicy(nn.Module):
                     current_new_mems.append(mem_i)
                 
                 h = torch.stack(h_list, dim=0)  # (N, H)
+                h = _clean(h)
                 outs.append(torch.cat(out_list, dim=0))  # (N, H)
                 
                 # --- 修復 B1: 每步後立即更新記憶 ---
@@ -749,6 +768,7 @@ class NCMultiAgentPolicy(nn.Module):
         outs = []
         for i, h in enumerate(hs):
             logits = self.actor_heads[i](h)
+            logits = torch.nan_to_num(logits, nan=0.0, posinf=20.0, neginf=-20.0)
             logits = torch.clamp(logits, -20.0, 20.0)
             if torch.isnan(logits).any():
                 raise RuntimeError("NaN in logits during _run_actor_heads")
@@ -765,6 +785,7 @@ class NCMultiAgentPolicy(nn.Module):
         return outs
 
     def _build_value_input(self, h_T_H, actions_T_N, aid):
+        h_T_H = _clean(h_T_H)
         n_n  = self.n_n_ls[aid]
         if n_n == 0: return h_T_H
 
@@ -833,8 +854,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         self.policy_loss = 0
         self.value_loss = 0
         self.entropy_loss = 0
-        Rs = torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev)
-        Advs = torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev)
+        Rs = _clean(torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev))
+        Advs = _clean(torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev))
         for i in range(self.n_agent):
             actor_dist_i = torch.distributions.categorical.Categorical(logits=ps[i])
             policy_loss_i, value_loss_i, entropy_loss_i = \
@@ -845,7 +866,10 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
             self.entropy_loss += entropy_loss_i
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.parameters(), 1.0)
+        for p in self.parameters():
+            if p.grad is not None and not torch.isfinite(p.grad).all():
+                p.grad.zero_()
+        torch.nn.utils.clip_grad_norm_(self.parameters(), 0.7)
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
 
@@ -925,6 +949,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
             for i in range(self.n_agent):
                 if i not in self.groups:
                     logits = self.actor_heads[i](hs[i])
+                    logits = torch.nan_to_num(logits, nan=0.0, posinf=20.0, neginf=-20.0)
                     logits = torch.clamp(logits, -20.0, 20.0)
                     if torch.isnan(logits).any():
                         raise RuntimeError("NaN in logits during _run_actor_heads")
@@ -952,6 +977,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
                     else:
                         h_i = hs[i]
                     logits = self.actor_heads[i](h_i)
+                    logits = torch.nan_to_num(logits, nan=0.0, posinf=20.0, neginf=-20.0)
                     logits = torch.clamp(logits, -20.0, 20.0)
                     if torch.isnan(logits).any():
                         raise RuntimeError("NaN in logits during _run_actor_heads")

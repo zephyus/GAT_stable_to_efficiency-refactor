@@ -153,6 +153,8 @@ class Trainer():
         self.env.train_mode = True
         self.pq = MyQueue(self.model_dir, maxsize=5)
         self.train_results = []
+        # counter for detecting repeated action overflows
+        self.action_overflow_cnt = 0
         # read GAT dropout schedule from model_config
         if hasattr(self.model, 'model_config') and self.model.model_config:
             self.gat_dropout_init = self.model.model_config.getfloat('gat_dropout_init', 0.2)
@@ -224,7 +226,23 @@ class Trainer():
                 else:
                     action.append(np.argmax(pi))
 
-        return policy, np.array(action)
+        action = np.asarray(action)
+        if hasattr(self.env, 'n_a_ls'):
+            n_a_ls = np.asarray(self.env.n_a_ls)
+            overflow_mask = action >= n_a_ls
+            if overflow_mask.any():
+                logging.error(
+                    "[ActionOverflow] agent idx: %s | picked: %s | max allowed: %s",
+                    np.where(overflow_mask)[0].tolist(),
+                    action[overflow_mask].tolist(),
+                    n_a_ls[overflow_mask].tolist(),
+                )
+                action = action % n_a_ls
+                self.action_overflow_cnt += int(overflow_mask.sum())
+                if self.action_overflow_cnt > 10:
+                    raise RuntimeError("Repeated action-space overflow detected!")
+
+        return policy, action
 
     def _get_value(self, ob, done, action):
         if self.agent.startswith('ma2c'):
