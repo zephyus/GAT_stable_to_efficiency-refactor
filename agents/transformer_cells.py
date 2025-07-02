@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .utils import _clean
 from typing import Tuple
 import math
 
@@ -52,7 +53,8 @@ class GTrXLCell(nn.Module):
             mem_next (Tensor): (mem_len, B, d_model) - updated memory
         """
         B = x_t.size(0)
-        
+
+        x_t = _clean(x_t)
         # Project input and add batch dim at sequence position
         x_proj = self.proj(x_t).unsqueeze(0)  # (1, B, d_model)
         
@@ -79,6 +81,7 @@ class GTrXLCell(nn.Module):
         scores = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         scores.clamp_(-80.0, 80.0)  # prevent overflow
         attn = F.softmax(scores, dim=-1)
+        attn.masked_fill_(~torch.isfinite(attn), 0.0)
         attn = F.dropout(attn, p=self.dropout, training=self.training)
         ctx = torch.matmul(attn, v)
         ctx = ctx.transpose(1, 2).reshape(B, L, self.d_model)
