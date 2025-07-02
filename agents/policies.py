@@ -58,12 +58,14 @@ class Policy(nn.Module):
                     na_sparse.append(torch.squeeze(one_hot(na_val, na_dim), dim=1))
                 na_sparse = torch.cat(na_sparse, dim=1)
             h = torch.cat([h, na_sparse.cuda()], dim=1)
-        return self.critic_head(h).squeeze()
+        v = self.critic_head(h).squeeze()
+        return _clean(v)
 
     def _run_loss(self, actor_dist, e_coef, v_coef, vs, As, Rs, Advs):
         As = As.cuda()
         Advs = Advs.cuda()
         Rs = Rs.cuda()
+        vs = _clean(vs)
         log_probs = actor_dist.log_prob(As)
         log_probs = torch.nan_to_num(log_probs, nan=0.0, posinf=0.0, neginf=0.0)
         Advs = torch.nan_to_num(Advs, nan=0.0, posinf=0.0, neginf=0.0)
@@ -425,6 +427,7 @@ class NCMultiAgentPolicy(nn.Module):
 
     def _run_loss(self, actor_dist, e_coef, v_coef, vs, As, Rs, Advs):
         """Compute individual loss components for a single agent."""
+        vs = _clean(vs)
         log_probs = actor_dist.log_prob(As)
         log_probs = torch.nan_to_num(log_probs, nan=0.0, posinf=0.0, neginf=0.0)
         Advs      = torch.nan_to_num(Advs, nan=0.0, posinf=0.0, neginf=0.0)
@@ -660,6 +663,7 @@ class NCMultiAgentPolicy(nn.Module):
 
         # Concatenate outputs back
         out = torch.cat(outputs, dim=0)  # (T*N, D)
+        out = _clean(out)
 
         if self.use_projection:
             out = self.gat_output_projection(out)
@@ -809,6 +813,7 @@ class NCMultiAgentPolicy(nn.Module):
         for i in range(self.n_agent):
             inp = self._build_value_input(hs_N_T_H[i], act_T_N, i)
             v   = self.critic_heads[i](inp).squeeze(-1)
+            v   = _clean(v)
             vals.append(v.detach().cpu().numpy() if detach else v)
         return vals
 

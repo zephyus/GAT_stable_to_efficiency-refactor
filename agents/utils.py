@@ -4,8 +4,8 @@ import torch.nn as nn
 import logging
 import sys # Import sys for StreamHandler
 
-def _clean(x: torch.Tensor, clip: float = 40.0) -> torch.Tensor:
-    """Replace NaN/Inf with 0 and clip extreme values."""
+def _clean(x: torch.Tensor, clip: float = 1e6) -> torch.Tensor:
+    """Replace NaN/Inf with 0 and clip extreme values (±1e6)."""
     if torch.isfinite(x).all():
         return x
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
