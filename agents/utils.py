@@ -4,8 +4,10 @@ import torch.nn as nn
 import logging
 import sys # Import sys for StreamHandler
 
-def _clean(x: torch.Tensor, clip: float = 50.0) -> torch.Tensor:
+def _clean(x: torch.Tensor, clip: float = 40.0) -> torch.Tensor:
     """Replace NaN/Inf with 0 and clip extreme values."""
+    if torch.isfinite(x).all():
+        return x
     x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
     return x.clamp_(-clip, clip)
 
@@ -138,6 +140,8 @@ class OnPolicyBuffer(TransBuffer):
         acts = np.array(self.acts, dtype=np.int32)
         Rs = np.array(self.Rs, dtype=np.float32)
         Advs = np.array(self.Advs, dtype=np.float32)
+        Rs = np.nan_to_num(Rs)
+        Advs = np.nan_to_num(Advs)
         # use pre-step dones here
         dones = np.array(self.dones[:-1], dtype=bool)
         self.reset(self.dones[-1])
@@ -191,6 +195,8 @@ class MultiAgentOnPolicyBuffer(OnPolicyBuffer):
         acts = np.transpose(np.array(self.acts, dtype=np.int32))
         Rs = np.array(self.Rs, dtype=np.float32)
         Advs = np.array(self.Advs, dtype=np.float32)
+        Rs = np.nan_to_num(Rs)
+        Advs = np.nan_to_num(Advs)
         dones = np.array(self.dones[:-1], dtype=bool)
         self.reset(self.dones[-1])
         return obs, policies, acts, dones, Rs, Advs
@@ -256,12 +262,10 @@ class Scheduler:
     def get(self, n_step):
         self.n += n_step
         if self.decay == 'linear':
-            if self.N > 0:
-                ratio = 1.0 - self.n / self.N
-            else:
-                ratio = 0.0
-            current_val = self.val * max(0.0, ratio)
-            return max(self.val_min, current_val)
+            if self.N == 0:
+                return self.val
+            ratio = max(0.0, 1.0 - self.n / self.N)
+            return max(self.val_min, self.val * ratio)
         else:
             return self.val
 
