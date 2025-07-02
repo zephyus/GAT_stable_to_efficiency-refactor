@@ -228,6 +228,7 @@ class Trainer():
 
         action = np.asarray(action)
         if hasattr(self.env, 'n_a_ls'):
+
             n_a_ls = np.asarray(self.env.n_a_ls)
             overflow_mask = action >= n_a_ls
             if overflow_mask.any():
