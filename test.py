@@ -95,12 +95,18 @@ def init_agent(env, config, total_step, seed):
 
 
 def train(args):
-    if (torch.cuda.is_available() == False):
-        print("no cuda available")
     base_dir = args.base_dir
     dirs = init_dir(base_dir)
-    init_log(dirs['log'])
-    
+    log_file_path = os.path.join(dirs['log'], 'training.log')
+    init_log(log_file_path)
+
+    # dump the running args
+    with open(os.path.join(dirs['log'], 'args.json'), 'w') as f:
+        import json
+        json.dump(vars(args), f, indent=4)
+
+    if (torch.cuda.is_available() == False):
+        print("no cuda available")
     config_dir = args.config_dir
     copy_file(config_dir, dirs['data'])
     config = configparser.ConfigParser() 
