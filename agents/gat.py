@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from .utils import _clean
 
 class GraphAttention(nn.Module):
     """
@@ -70,4 +71,4 @@ class GraphAttention(nn.Module):
             h_prime  = torch.matmul(attn_drop, Wh)
             final_attn = attn
 
-        return h_prime, final_attn
+        return _clean(h_prime), _clean(final_attn)

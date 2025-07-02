@@ -158,6 +158,8 @@ class OnPolicyBuffer(TransBuffer):
             Advs.append(Adv)
         Rs.reverse()
         Advs.reverse()
+        Rs = np.clip(np.array(Rs), -1e12, 1e12)
+        Advs = np.clip(np.array(Advs), -1e12, 1e12)
         self.Rs = Rs
         self.Advs = Advs
 
@@ -177,6 +179,8 @@ class OnPolicyBuffer(TransBuffer):
             Advs.append(Adv)
         Rs.reverse()
         Advs.reverse()
+        Rs = np.clip(np.array(Rs), -1e12, 1e12)
+        Advs = np.clip(np.array(Advs), -1e12, 1e12)
         self.Rs = Rs
         self.Advs = Advs
 
@@ -218,8 +222,10 @@ class MultiAgentOnPolicyBuffer(OnPolicyBuffer):
             cur_Advs.reverse()
             Rs.append(cur_Rs)
             Advs.append(cur_Advs)
-        self.Rs = np.array(Rs)
-        self.Advs = np.array(Advs)
+        Rs = np.clip(np.array(Rs), -1e12, 1e12)
+        Advs = np.clip(np.array(Advs), -1e12, 1e12)
+        self.Rs = Rs
+        self.Advs = Advs
 
 
     def _add_s_R_Adv(self, R):
@@ -245,8 +251,10 @@ class MultiAgentOnPolicyBuffer(OnPolicyBuffer):
             cur_Advs.reverse()
             Rs.append(cur_Rs)
             Advs.append(cur_Advs)
-        self.Rs = np.array(Rs)
-        self.Advs = np.array(Advs)
+        Rs = np.clip(np.array(Rs), -1e12, 1e12)
+        Advs = np.clip(np.array(Advs), -1e12, 1e12)
+        self.Rs = Rs
+        self.Advs = Advs
 
 """
 util functions

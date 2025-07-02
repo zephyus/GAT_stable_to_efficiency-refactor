@@ -109,16 +109,17 @@ class LstmPolicy(Policy):
         logits = torch.clamp(logits, -20.0, 20.0)
         actor_dist = torch.distributions.categorical.Categorical(logits=F.log_softmax(logits, dim=1))
         vs = self._run_critic_head(hs, nactions)
+        Rs_t = _clean(torch.from_numpy(Rs).float())
+        Advs_t = _clean(torch.from_numpy(Advs).float())
         self.policy_loss, self.value_loss, self.entropy_loss = \
             self._run_loss(actor_dist, e_coef, v_coef, vs,
                            torch.from_numpy(acts).long(),
-                           torch.from_numpy(Rs).float(),
-                           torch.from_numpy(Advs).float())
+                           Rs_t, Advs_t)
         self.loss = self.policy_loss + self.value_loss + self.entropy_loss
         self.loss.backward()
         for p in self.parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
-                p.grad = None
+                p.grad.zero_()
         torch.nn.utils.clip_grad_norm_(self.parameters(), 0.7)
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
@@ -397,8 +398,8 @@ class NCMultiAgentPolicy(nn.Module):
             Rs_t = Rs_t.transpose(0, 1)
         if Advs_t.dim() >= 2 and Advs_t.size(0) == self.n_agent and Advs_t.size(1) != self.n_agent:
             Advs_t = Advs_t.transpose(0, 1)
-        Rs = Rs_t.to(self.dev)
-        Advs = Advs_t.to(self.dev)
+        Rs = _clean(Rs_t.to(self.dev))
+        Advs = _clean(Advs_t.to(self.dev))
         
         # Compute losses for each agent
         for i in range(self.n_agent):
@@ -415,7 +416,8 @@ class NCMultiAgentPolicy(nn.Module):
         self.loss.backward()
         for p in self.parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
-                p.grad = None
+
+                p.grad.zero_()
         torch.nn.utils.clip_grad_norm_(self.parameters(), 0.7)
         
         # Optional tensorboard logging
@@ -853,8 +855,8 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         self.policy_loss = 0
         self.value_loss = 0
         self.entropy_loss = 0
-        Rs = torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev)
-        Advs = torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev)
+        Rs = _clean(torch.from_numpy(Rs).float().transpose(0, 1).to(self.dev))
+        Advs = _clean(torch.from_numpy(Advs).float().transpose(0, 1).to(self.dev))
         for i in range(self.n_agent):
             actor_dist_i = torch.distributions.categorical.Categorical(logits=ps[i])
             policy_loss_i, value_loss_i, entropy_loss_i = \
@@ -867,7 +869,7 @@ class NCLMMultiAgentPolicy(NCMultiAgentPolicy):
         self.loss.backward()
         for p in self.parameters():
             if p.grad is not None and not torch.isfinite(p.grad).all():
-                p.grad = None
+                p.grad.zero_()
         torch.nn.utils.clip_grad_norm_(self.parameters(), 0.7)
         if summary_writer is not None:
             self._update_tensorboard(summary_writer, global_step)
