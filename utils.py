@@ -224,7 +224,12 @@ class Trainer():
                 else:
                     action.append(np.argmax(pi))
 
-        return policy, np.array(action)
+        action = np.asarray(action)
+        if hasattr(self.env, 'n_a_ls'):
+            for i, max_a in enumerate(self.env.n_a_ls):
+                action[i] %= max_a
+
+        return policy, action
 
     def _get_value(self, ob, done, action):
         if self.agent.startswith('ma2c'):
