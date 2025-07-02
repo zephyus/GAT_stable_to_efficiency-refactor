@@ -253,6 +253,7 @@ class Trainer():
             if not self.naction:
                 self.naction = np.nan
             value = self.model.forward(ob, done, self.naction, 'v')
+        value = np.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0)
         return value
 
     def _log_episode(self, global_step, mean_reward, std_reward):
@@ -436,6 +437,8 @@ class Trainer():
                                 total_norm += param_norm.item() ** 2
                         total_norm = total_norm ** 0.5
                         self.summary_writer.add_scalar('train/grad_norm', total_norm, global_step)
+                        max_param = max(p.abs().max().item() for p in self.model.parameters())
+                        self.summary_writer.add_scalar('debug/max_param', max_param, global_step)
 
                         # periodically flush TensorBoard writer
                         if global_step % 50 == 0 and self.summary_writer is not None:

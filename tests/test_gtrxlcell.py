@@ -14,3 +14,13 @@ def test_gtrxl_shapes_and_params():
     for attr in ["W_r", "U_r", "W_z", "U_z", "W_g", "U_g"]:
         assert hasattr(cell, attr)
     assert new_mem.requires_grad
+
+def test_graphattn_no_nan():
+    from agents.gat import GraphAttention
+    g = GraphAttention(32, 32)
+    g.eval()
+    h = torch.randn(5, 32)
+    adj = torch.ones(5, 5)
+    with torch.no_grad():
+        out, att = g(h, adj)
+    assert torch.isfinite(out).all() and torch.isfinite(att).all()
